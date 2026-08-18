@@ -1361,19 +1361,35 @@ async def leaderboard_me(user: dict = Depends(require_roles("siswa"))):
     return out
 
 
-@api_router.get("/leaderboard/global")
-async def leaderboard_global(user: dict = Depends(get_current_user)):
+async def compute_global_leaderboard(start=None, end=None, category_id=None):
     students = await db.users.find({"role": "siswa"}).to_list(5000)
     classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
     cls_by_student = {}
     for c in classes:
         for sid in c.get("student_ids", []):
             cls_by_student.setdefault(sid, []).append(c["name"])
+    pkg_ids = None
+    if category_id:
+        pkgs = await db.packages.find({"category_id": category_id}, {"_id": 0, "id": 1}).to_list(2000)
+        pkg_ids = {p["id"] for p in pkgs}
     rows = []
     for u in students:
         uid = str(u["_id"])
-        atts = await db.attempts.find({"student_id": uid, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
-        scores = [a["score"] for a in atts if a.get("score") is not None]
+        atts = await db.attempts.find(
+            {"student_id": uid, "status": "selesai"},
+            {"_id": 0, "score": 1, "submitted_at": 1, "package_id": 1}).to_list(5000)
+        scores = []
+        for a in atts:
+            if a.get("score") is None:
+                continue
+            if pkg_ids is not None and a.get("package_id") not in pkg_ids:
+                continue
+            st = (a.get("submitted_at") or "")[:10]
+            if start and (not st or st < start):
+                continue
+            if end and (not st or st > end):
+                continue
+            scores.append(a["score"])
         rows.append({
             "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
             "classes": cls_by_student.get(uid, []),
@@ -1383,7 +1399,66 @@ async def leaderboard_global(user: dict = Depends(get_current_user)):
     rows.sort(key=lambda r: (-r["avg_score"], r["name"].lower()))
     for i, r in enumerate(rows):
         r["rank"] = i + 1
+    return rows
+
+
+@api_router.get("/leaderboard/global")
+async def leaderboard_global(start: Optional[str] = None, end: Optional[str] = None,
+                             category_id: Optional[str] = None,
+                             user: dict = Depends(get_current_user)):
+    rows = await compute_global_leaderboard(start, end, category_id)
     return {"rows": rows}
+
+
+@api_router.get("/export/leaderboard/xlsx")
+async def export_leaderboard(start: Optional[str] = None, end: Optional[str] = None,
+                             category_id: Optional[str] = None,
+                             user: dict = Depends(require_roles("admin", "guru"))):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    rows = await compute_global_leaderboard(start, end, category_id)
+    cat_name = "Semua Mapel"
+    if category_id:
+        cat = await db.categories.find_one({"id": category_id}, {"_id": 0, "name": 1})
+        cat_name = cat["name"] if cat else category_id
+    period = f"{start or '...'} s/d {end or '...'}" if (start or end) else "Semua waktu"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Peringkat Angkatan"
+    ws.append(["PERINGKAT ANGKATAN"])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=6)
+    ws["A1"].font = Font(bold=True, size=14, color="1E3A30")
+    ws.append([f"Mapel: {cat_name}", "", f"Periode: {period}"])
+    ws.append([])
+    header = ["Peringkat", "Nama Siswa", "NISN/NIP", "Kelas", "Ujian Selesai", "Rata-rata"]
+    ws.append(header)
+    green = PatternFill("solid", fgColor="1E3A30")
+    thin = Side(style="thin", color="D9D9CF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    hrow = ws.max_row
+    for cell in ws[hrow]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = green
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = border
+    for r in rows:
+        ws.append([r["rank"], r["name"], r.get("identifier", ""), ", ".join(r.get("classes", [])),
+                   r["completed"], r["avg_score"]])
+        for cell in ws[ws.max_row]:
+            cell.border = border
+    ws.column_dimensions["A"].width = 10
+    ws.column_dimensions["B"].width = 26
+    ws.column_dimensions["C"].width = 16
+    ws.column_dimensions["D"].width = 22
+    ws.column_dimensions["E"].width = 14
+    ws.column_dimensions["F"].width = 12
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=peringkat-angkatan.xlsx"})
 
 
 # ------------------------------------------------------------------ startup

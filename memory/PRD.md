@@ -63,6 +63,11 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Ambang per Paket**: paket bisa punya ambang kesukaran khusus (easy_min/medium_min) yang menimpa setelan global; analitik menampilkan sumber ("khusus paket"/"global"). Validasi 0 ≤ Sedang < Mudah ≤ 100 di backend.
 - Verified: 10/10 pytest iter-6 lolos + frontend E2E 100%, tanpa isu kritis.
 
+## Implemented (2026-08-18) — Iteration 7
+- **Filter Peringkat**: peringkat angkatan bisa disaring per rentang tanggal (`start`/`end`) dan/atau mata pelajaran (kategori) via `/api/leaderboard/global`; bar filter tampil hanya di mode Angkatan, dengan tombol Reset.
+- **Ekspor Peringkat**: tombol "Ekspor Excel" mengunduh papan peringkat angkatan (mengikuti filter aktif) via `/api/export/leaderboard/xlsx` (openpyxl, hanya admin/guru).
+- Verified: 12/12 pytest iter-7 lolos + frontend E2E 100%, tanpa isu.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
