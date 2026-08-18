@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Users, Search } from "lucide-react";
+import { Plus, Pencil, Trash2, Users, Search, Download } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -53,6 +53,15 @@ export default function Classes() {
     await api.delete(`/classes/${c.id}`); toast.success("Kelas dihapus"); load();
   };
 
+  const exportGrades = async (c) => {
+    try {
+      const res = await api.get(`/export/class/${c.id}/xlsx`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a"); a.href = url; a.download = `rekap-nilai-${c.name}.xlsx`; a.click();
+      toast.success("Rekap nilai diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   const filtered = students.filter((s) =>
     s.name.toLowerCase().includes(q.toLowerCase()) || (s.identifier || "").includes(q));
 
@@ -82,7 +91,12 @@ export default function Classes() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mt-1 mb-4">{c.description || "Tanpa deskripsi"}</p>
-              <Badge className="bg-primary/10 text-primary border-0">{c.student_count} siswa</Badge>
+              <div className="flex items-center justify-between gap-2">
+                <Badge className="bg-primary/10 text-primary border-0">{c.student_count} siswa</Badge>
+                <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
+                  <Download className="h-4 w-4 mr-1.5" />Rekap Nilai
+                </Button>
+              </div>
             </div>
           ))}
         </div>

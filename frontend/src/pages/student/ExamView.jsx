@@ -3,7 +3,7 @@ import { useParams, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
 import { Clock, ChevronLeft, ChevronRight, Send, LayoutGrid } from "lucide-react";
-import api, { apiError } from "../../lib/api";
+import api, { apiError, fileUrl } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Textarea } from "../../components/ui/textarea";
 import {
@@ -122,6 +122,7 @@ export default function ExamView() {
           >
             <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground mb-3">Soal {idx + 1} dari {questions.length}</p>
             <p className="text-lg sm:text-xl leading-loose font-medium mb-8" data-testid="question-text">{q.text}</p>
+            {q.image_path && <img src={fileUrl(q.image_path)} alt="Gambar soal" className="mb-8 max-h-80 rounded-md border border-border" />}
 
             {q.type === "pg" && (
               <div className="space-y-3" data-testid="options-list">

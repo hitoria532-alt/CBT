@@ -20,5 +20,8 @@ export function apiError(e) {
   return String(detail);
 }
 
+export const fileUrl = (path) =>
+  path ? `${API}/files/${path}?auth=${encodeURIComponent(localStorage.getItem("token") || "")}` : null;
+
 export { API };
 export default api;

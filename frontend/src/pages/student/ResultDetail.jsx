@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import { ArrowLeft, CheckCircle2, XCircle, Clock, Download } from "lucide-react";
-import api from "../../lib/api";
+import api, { fileUrl } from "../../lib/api";
 import { QTYPE_LABEL } from "../../lib/utils2";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
@@ -60,6 +60,7 @@ export default function ResultDetail() {
               )}
             </div>
             <p className="text-sm font-medium leading-relaxed mb-3">{d.text}</p>
+            {d.image_path && <img src={fileUrl(d.image_path)} alt="" className="mb-3 max-h-40 rounded border border-border" />}
 
             {d.type === "pg" && (
               <div className="space-y-1.5 text-sm">

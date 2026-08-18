@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, FileQuestion, Upload, Download } from "lucide-react";
-import api, { apiError } from "../../lib/api";
+import { Plus, Pencil, Trash2, FileQuestion, Upload, Download, Image as ImageIcon, X } from "lucide-react";
+import api, { apiError, fileUrl } from "../../lib/api";
 import { QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -15,7 +15,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { category_id: "", type: "pg", text: "", options: ["", "", "", ""], correct_answer: "0", weight: 1 };
+const EMPTY = { category_id: "", type: "pg", text: "", options: ["", "", "", ""], correct_answer: "0", weight: 1, image_path: null };
 
 export default function Questions() {
   const [items, setItems] = useState([]);
@@ -27,6 +27,22 @@ export default function Questions() {
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const fileRef = useRef();
+  const imgRef = useRef();
+  const [uploadingImg, setUploadingImg] = useState(false);
+
+  const uploadImage = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f);
+    setUploadingImg(true);
+    try {
+      const { data } = await api.post("/uploads/image", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setForm((prev) => ({ ...prev, image_path: data.path }));
+      toast.success("Gambar terunggah");
+    } catch (err) { toast.error(apiError(err)); }
+    finally { setUploadingImg(false); if (imgRef.current) imgRef.current.value = ""; }
+  };
 
   const reloadCats = () => api.get("/categories").then((r) => setCats(r.data));
 
@@ -62,6 +78,7 @@ export default function Questions() {
       options: q.options?.length ? q.options : ["", "", "", ""],
       correct_answer: q.correct_answer ?? (q.type === "truefalse" ? "true" : "0"),
       weight: q.weight ?? 1,
+      image_path: q.image_path || null,
     });
     setOpen(true);
   };
@@ -80,6 +97,7 @@ export default function Questions() {
       options: form.type === "pg" ? form.options.filter((o) => o.trim() !== "" || true) : [],
       correct_answer: form.type === "essay" ? null : String(form.correct_answer),
       weight: Number(form.weight) || 1,
+      image_path: form.image_path || null,
     };
     if (!payload.text.trim()) return toast.error("Teks soal wajib diisi");
     try {
@@ -134,6 +152,7 @@ export default function Questions() {
                   <Badge className="text-xs bg-primary/10 text-primary border-0">Bobot {q.weight}</Badge>
                 </div>
                 <p className="text-sm leading-relaxed">{q.text}</p>
+                {q.image_path && <img src={fileUrl(q.image_path)} alt="" className="mt-2 max-h-32 rounded border border-border" />}
                 {q.type === "pg" && (
                   <ul className="mt-2 text-sm text-muted-foreground space-y-1">
                     {q.options.map((o, oi) => (
@@ -186,6 +205,24 @@ export default function Questions() {
             <div className="space-y-2">
               <Label>Teks Soal</Label>
               <Textarea value={form.text} onChange={(e) => setForm({ ...form, text: e.target.value })} rows={3} data-testid="question-text-input" />
+            </div>
+
+            <div className="space-y-2">
+              <Label>Gambar Soal (opsional)</Label>
+              {form.image_path ? (
+                <div className="relative inline-block">
+                  <img src={fileUrl(form.image_path)} alt="soal" className="max-h-40 rounded-md border border-border" />
+                  <button type="button" onClick={() => setForm({ ...form, image_path: null })} data-testid="remove-image-btn"
+                    className="absolute -top-2 -right-2 bg-destructive text-destructive-foreground rounded-full p-1 shadow"><X className="h-3 w-3" /></button>
+                </div>
+              ) : (
+                <div>
+                  <input ref={imgRef} type="file" accept="image/*" onChange={uploadImage} className="hidden" data-testid="question-image-input" />
+                  <Button type="button" variant="outline" onClick={() => imgRef.current?.click()} disabled={uploadingImg} data-testid="upload-image-btn">
+                    <ImageIcon className="h-4 w-4 mr-2" />{uploadingImg ? "Mengunggah..." : "Unggah Gambar"}
+                  </Button>
+                </div>
+              )}
             </div>
 
             {form.type === "pg" && (

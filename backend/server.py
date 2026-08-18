@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 import os
 import io
+import hmac
 import logging
 import uuid
 import random
@@ -14,9 +15,11 @@ from typing import List, Optional, Any
 
 import jwt
 import bcrypt
+import requests
 import pandas as pd
 from bson import ObjectId
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File
+from fastapi import (FastAPI, APIRouter, HTTPException, Depends, Request, Response,
+                     UploadFile, File, BackgroundTasks, Header, Query)
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -31,6 +34,48 @@ app = FastAPI()
 api_router = APIRouter(prefix="/api")
 
 JWT_ALGORITHM = "HS256"
+
+# ------------------------------------------------------------------ object storage
+STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
+STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
+EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+APP_NAME = "cbt-ujian"
+_storage_key = None
+
+
+def init_storage(force: bool = False):
+    global _storage_key
+    if _storage_key and not force:
+        return _storage_key
+    resp = requests.post(f"{STORAGE_URL}/init", json={"emergent_key": EMERGENT_KEY}, timeout=30)
+    resp.raise_for_status()
+    _storage_key = resp.json()["storage_key"]
+    return _storage_key
+
+
+def put_object(path: str, data: bytes, content_type: str) -> dict:
+    key = init_storage()
+    resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                        headers={"X-Storage-Key": key, "Content-Type": content_type},
+                        data=data, timeout=120)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.put(f"{STORAGE_URL}/objects/{path}",
+                            headers={"X-Storage-Key": key, "Content-Type": content_type},
+                            data=data, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_object(path: str):
+    key = init_storage()
+    resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    if resp.status_code == 404:
+        key = init_storage(force=True)
+        resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
+    resp.raise_for_status()
+    return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
 
 
 def get_jwt_secret() -> str:
@@ -142,6 +187,7 @@ class Question(BaseModel):
     options: List[str] = []          # for pg
     correct_answer: Optional[str] = None  # index string for pg, "true"/"false" for tf
     weight: float = 1.0
+    image_path: Optional[str] = None
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -152,6 +198,7 @@ class QuestionBody(BaseModel):
     options: List[str] = []
     correct_answer: Optional[str] = None
     weight: float = 1.0
+    image_path: Optional[str] = None
 
 
 class Package(BaseModel):
@@ -459,7 +506,7 @@ def sanitize_question(q: dict, perm: Optional[List[int]] = None) -> dict:
         opts = [opts[i] for i in perm if i < len(opts)]
     return {
         "id": q["id"], "type": q["type"], "text": q["text"],
-        "options": opts, "weight": q.get("weight", 1.0),
+        "options": opts, "weight": q.get("weight", 1.0), "image_path": q.get("image_path"),
     }
 
 
@@ -552,20 +599,14 @@ def compute_grade(pkg: dict, questions: dict, answers: dict, essay_scores: dict 
     return details, needs_grading, score, round(earned, 2), round(total_possible, 2)
 
 
-@api_router.post("/exam/submit")
-async def submit_exam(body: SubmitBody, user: dict = Depends(require_roles("siswa"))):
-    attempt = await db.attempts.find_one({"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
-    if not attempt:
-        raise HTTPException(status_code=404, detail="Percobaan tidak ditemukan")
-    if attempt["status"] != "berlangsung":
-        raise HTTPException(status_code=400, detail="Sesi sudah dikumpulkan")
+async def finalize_attempt(attempt: dict, answers: dict) -> dict:
+    """Convert shuffled indices, grade, and persist. Shared by submit + auto-submit."""
     pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
     qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
-    # Convert shuffled option indices back to original indices for pg questions
     perm_map = attempt.get("option_perm", {})
     canonical = {}
-    for qid, ans in body.answers.items():
+    for qid, ans in (answers or {}).items():
         q = qmap.get(qid)
         if q and q.get("type") == "pg" and qid in perm_map and ans not in (None, ""):
             try:
@@ -582,7 +623,18 @@ async def submit_exam(body: SubmitBody, user: dict = Depends(require_roles("sisw
         "submitted_at": now_iso(),
     }
     await db.attempts.update_one({"id": attempt["id"]}, {"$set": update})
-    return {"status": update["status"], "score": score, "needs_grading": needs_grading}
+    return update
+
+
+@api_router.post("/exam/submit")
+async def submit_exam(body: SubmitBody, user: dict = Depends(require_roles("siswa"))):
+    attempt = await db.attempts.find_one({"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Percobaan tidak ditemukan")
+    if attempt["status"] != "berlangsung":
+        raise HTTPException(status_code=400, detail="Sesi sudah dikumpulkan")
+    update = await finalize_attempt(attempt, body.answers)
+    return {"status": update["status"], "score": update["score"], "needs_grading": update["needs_grading"]}
 
 
 @api_router.post("/exam/save/{session_id}")
@@ -628,7 +680,7 @@ async def result_detail(attempt_id: str, user: dict = Depends(get_current_user))
     for d in attempt.get("details", []):
         q = qmap.get(d["question_id"], {})
         enriched.append({**d, "text": q.get("text"), "options": q.get("options", []),
-                         "correct_answer": q.get("correct_answer")})
+                         "correct_answer": q.get("correct_answer"), "image_path": q.get("image_path")})
     attempt["details"] = enriched
     attempt["session_title"] = session["title"] if session else "-"
     attempt["scoring_method"] = pkg.get("scoring_method")
@@ -879,6 +931,206 @@ async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
 
 
 
+# ------------------------------------------------------------------ IMAGE UPLOAD
+ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+               "webp": "image/webp", "gif": "image/gif"}
+
+
+@api_router.post("/uploads/image")
+async def upload_image(file: UploadFile = File(...), user: dict = Depends(require_roles("admin", "guru"))):
+    fname = file.filename or ""
+    ext = fname.rsplit(".", 1)[-1].lower() if "." in fname else ""
+    if ext not in ALLOWED_IMG:
+        raise HTTPException(status_code=400, detail="Format harus png/jpg/webp/gif")
+    data = await file.read()
+    if len(data) > 5 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Ukuran gambar maksimal 5MB")
+    ct = ALLOWED_IMG[ext]
+    path = f"{APP_NAME}/questions/{user['id']}/{new_id()}.{ext}"
+    try:
+        result = put_object(path, data, ct)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Gagal mengunggah gambar: {e}")
+    await db.files.insert_one({
+        "id": new_id(), "storage_path": result["path"], "original_filename": fname,
+        "content_type": ct, "size": result.get("size"), "is_deleted": False,
+        "created_at": now_iso(),
+    })
+    return {"path": result["path"]}
+
+
+@api_router.get("/files/{path:path}")
+async def get_file(path: str, authorization: Optional[str] = Header(None), auth: Optional[str] = Query(None)):
+    token = None
+    if authorization and authorization.startswith("Bearer "):
+        token = authorization[7:]
+    elif auth:
+        token = auth
+    if not token:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        jwt.decode(token, get_jwt_secret(), algorithms=[JWT_ALGORITHM])
+    except jwt.InvalidTokenError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    record = await db.files.find_one({"storage_path": path, "is_deleted": False})
+    if not record:
+        raise HTTPException(status_code=404, detail="File tidak ditemukan")
+    try:
+        data, content_type = get_object(path)
+    except Exception:
+        raise HTTPException(status_code=404, detail="File tidak ditemukan")
+    return Response(content=data, media_type=record.get("content_type", content_type))
+
+
+# ------------------------------------------------------------------ AUTO-SUBMIT (cron)
+async def run_auto_submit():
+    now = datetime.now(timezone.utc)
+    attempts = await db.attempts.find({"status": "berlangsung"}, {"_id": 0}).to_list(5000)
+    count = 0
+    for att in attempts:
+        session = await db.sessions.find_one({"id": att["session_id"]}, {"_id": 0})
+        if not session:
+            continue
+        try:
+            end = datetime.fromisoformat(session["end_time"])
+            started = datetime.fromisoformat(att["started_at"])
+        except Exception:
+            continue
+        deadline = min(end, started + timedelta(minutes=session.get("duration_minutes", 60)))
+        if now >= deadline:
+            await finalize_attempt(att, att.get("answers", {}))
+            count += 1
+    logging.getLogger(__name__).info(f"Auto-submit finalized {count} attempt(s)")
+    return count
+
+
+@api_router.post("/cron/auto-submit")
+async def cron_auto_submit(request: Request, background: BackgroundTasks):
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    secret = os.environ.get("WEBHOOK_CRON_SECRET", "")
+    auth = request.headers.get("Authorization", "")
+    token = auth[7:] if auth.startswith("Bearer ") else ""
+    if not secret or not hmac.compare_digest(token, secret):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    background.add_task(run_auto_submit)
+    return {"accepted": True}
+
+
+# ------------------------------------------------------------------ ITEM ANALYTICS
+@api_router.get("/analytics/session/{session_id}")
+async def analytics_session(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
+    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    qmap = {q["id"]: q for q in qlist}
+    attempts = await db.attempts.find(
+        {"session_id": session_id, "status": {"$in": ["selesai", "menunggu_koreksi"]}}, {"_id": 0}
+    ).to_list(5000)
+
+    items = []
+    for qid in pkg.get("question_ids", []):
+        q = qmap.get(qid)
+        if not q:
+            continue
+        total = answered = correct_count = 0
+        pts_earned = pts_possible = 0.0
+        for att in attempts:
+            det = next((d for d in att.get("details", []) if d["question_id"] == qid), None)
+            if not det:
+                continue
+            total += 1
+            if det.get("answer") not in (None, ""):
+                answered += 1
+            if q["type"] in ("pg", "truefalse"):
+                if det.get("is_correct"):
+                    correct_count += 1
+            else:
+                pts_earned += det.get("points_earned", 0) or 0
+                pts_possible += det.get("points_possible", 0) or 0
+        if q["type"] in ("pg", "truefalse"):
+            p = (correct_count / total) if total else 0
+        else:
+            p = (pts_earned / pts_possible) if pts_possible else 0
+        difficulty = "Mudah" if p >= 0.7 else ("Sedang" if p >= 0.4 else "Sulit")
+        items.append({
+            "question_id": qid, "text": q["text"], "type": q["type"],
+            "total": total, "answered": answered,
+            "correct": correct_count if q["type"] in ("pg", "truefalse") else None,
+            "percent_correct": round(p * 100, 1), "difficulty": difficulty,
+        })
+    return {"session_title": session["title"], "participants": len(attempts), "items": items}
+
+
+# ------------------------------------------------------------------ CLASS GRADE EXPORT (Excel)
+@api_router.get("/export/class/{class_id}/xlsx")
+async def export_class_grades(class_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    sids = cls.get("student_ids", [])
+    students = []
+    if sids:
+        docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in sids]}}).to_list(2000)
+        students = sorted([clean_user(u) for u in docs], key=lambda x: x["name"].lower())
+    sessions = await db.sessions.find(
+        {"$or": [{"class_ids": class_id}, {"class_ids": {"$size": 0}}, {"class_ids": {"$exists": False}}]},
+        {"_id": 0}
+    ).sort("start_time", 1).to_list(1000)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Rekap Nilai"
+    ws.append([f"REKAP NILAI - {cls['name']}"])
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=max(4, 4 + len(sessions)))
+    ws["A1"].font = Font(bold=True, size=14, color="1E3A30")
+    header = ["No", "Nama Siswa", "NISN/NIP"] + [s["title"] for s in sessions] + ["Rata-rata"]
+    ws.append(header)
+    green = PatternFill("solid", fgColor="1E3A30")
+    thin = Side(style="thin", color="D9D9CF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    for cell in ws[2]:
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = green
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = border
+
+    for i, st in enumerate(students):
+        row = [i + 1, st["name"], st.get("identifier", "")]
+        scores = []
+        for s in sessions:
+            att = await db.attempts.find_one({"session_id": s["id"], "student_id": st["id"]}, {"_id": 0})
+            val = att.get("score") if att and att.get("score") is not None else None
+            row.append(val if val is not None else "-")
+            if val is not None:
+                scores.append(val)
+        row.append(round(sum(scores) / len(scores), 1) if scores else "-")
+        ws.append(row)
+        for cell in ws[ws.max_row]:
+            cell.border = border
+            if cell.column > 3:
+                cell.alignment = Alignment(horizontal="center")
+
+    ws.column_dimensions["A"].width = 5
+    ws.column_dimensions["B"].width = 26
+    ws.column_dimensions["C"].width = 16
+    from openpyxl.utils import get_column_letter
+    for idx in range(4, 4 + len(sessions) + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 16
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"rekap-nilai-{cls['name']}.xlsx".replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
 # ------------------------------------------------------------------ DASHBOARD
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(require_roles("admin", "guru"))):
@@ -900,6 +1152,11 @@ async def dashboard_stats(user: dict = Depends(require_roles("admin", "guru"))):
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
+    try:
+        init_storage()
+        logger.info("Object storage initialized")
+    except Exception as e:
+        logging.getLogger(__name__).error(f"Storage init failed: {e}")
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})

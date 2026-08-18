@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3 } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -19,6 +19,7 @@ export default function Results() {
   const [data, setData] = useState(null);
   const [grading, setGrading] = useState(null); // attempt detail being graded
   const [scores, setScores] = useState({});
+  const [analytics, setAnalytics] = useState(null);
 
   useEffect(() => { api.get("/sessions").then((r) => setSessions(r.data)); }, []);
 
@@ -61,6 +62,11 @@ export default function Results() {
     const res = await api.get(`/results/detail/${attemptId}/pdf`, { responseType: "blob" });
     const url = URL.createObjectURL(res.data);
     const el = document.createElement("a"); el.href = url; el.download = "kartu-hasil.pdf"; el.click();
+  };
+
+  const openAnalytics = async () => {
+    const r = await api.get(`/analytics/session/${active.id}`);
+    setAnalytics(r.data);
   };
 
   // ---- Detail (grade) view
@@ -113,6 +119,45 @@ export default function Results() {
     );
   }
 
+  // ---- Item analytics view
+  if (analytics && active) {
+    const diffColor = { Mudah: "bg-primary/10 text-primary", Sedang: "bg-secondary/20 text-secondary-foreground", Sulit: "bg-destructive/10 text-destructive" };
+    return (
+      <div data-testid="analytics-view">
+        <button onClick={() => setAnalytics(null)} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
+          <ArrowLeft className="h-4 w-4" /> Kembali ke hasil
+        </button>
+        <h1 className="font-heading text-2xl font-semibold">Analitik Butir Soal</h1>
+        <p className="text-muted-foreground mb-6">{analytics.session_title} · {analytics.participants} peserta</p>
+        {analytics.participants === 0 ? (
+          <div className="border border-dashed border-border rounded-md p-12 text-center text-muted-foreground">Belum ada peserta yang mengumpulkan.</div>
+        ) : (
+          <div className="space-y-3">
+            {analytics.items.map((it, i) => (
+              <div key={it.question_id} className="bg-card border border-border rounded-md p-5" data-testid={`analytics-item-${i}`}>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <p className="text-sm font-medium leading-relaxed mb-2"><span className="text-muted-foreground">{i + 1}.</span> {it.text}</p>
+                    <p className="text-xs text-muted-foreground">
+                      {it.correct != null ? `${it.correct}/${it.total} menjawab benar` : `Rerata nilai esai`} · {it.answered}/{it.total} menjawab
+                    </p>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <p className="font-heading text-2xl font-bold">{it.percent_correct}%</p>
+                    <Badge className={`${diffColor[it.difficulty]} border-0 text-xs`}>{it.difficulty}</Badge>
+                  </div>
+                </div>
+                <div className="h-2 bg-muted rounded-full mt-3 overflow-hidden">
+                  <div className="h-full bg-primary rounded-full transition-all" style={{ width: `${it.percent_correct}%` }} />
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // ---- Session results table
   if (active && data) {
     const scored = data.attempts.filter((a) => a.score != null);
@@ -127,7 +172,10 @@ export default function Results() {
             <h1 className="font-heading text-2xl font-semibold">{active.title}</h1>
             <p className="text-muted-foreground">{data.attempts.length} peserta · rata-rata {avg}</p>
           </div>
-          <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={openAnalytics} data-testid="analytics-btn"><BarChart3 className="h-4 w-4 mr-2" />Analitik Butir</Button>
+            <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+          </div>
         </div>
         <div className="bg-card border border-border rounded-md overflow-hidden">
           <Table>

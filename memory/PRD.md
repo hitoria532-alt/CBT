@@ -39,6 +39,13 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Kartu Hasil PDF**: unduh kartu hasil ujian (reportlab) untuk siswa & admin/guru.
 - Verified: shuffle+grading E2E benar, class filtering benar, PDF 200 application/pdf, semua selektor UI ada.
 
+## Implemented (2026-08-18) — Iteration 3
+- **Auto-Submit Server**: cron `.emergent/crons.yml` (tiap 15 menit) memanggil `/api/cron/auto-submit` (auth Bearer WEBHOOK_CRON_SECRET, kerja di background). Menyelesaikan+menilai attempt 'berlangsung' yang sudah lewat batas waktu sesi/durasi walau browser ditutup. Logika submit dipakai bersama via `finalize_attempt()`.
+- **Analitik Butir Soal**: `/api/analytics/session/{id}` — persen benar & tingkat kesukaran (Mudah/Sedang/Sulit) per soal; tombol "Analitik Butir" di Hasil & Koreksi.
+- **Ekspor Rekap Nilai**: `/api/export/class/{id}/xlsx` (openpyxl, header bertema) — rekap nilai satu kelas; tombol "Rekap Nilai" di kartu kelas.
+- **Bank Media Soal**: object storage (Emergent) untuk gambar soal — `/api/uploads/image` + `/api/files/{path}` (auth via header/query). Gambar tampil di editor soal, ExamView, & detail hasil.
+- Verified: backend 14/14 pytest lolos (termasuk uji timing auto-submit), frontend E2E lolos (unduh xlsx nyata, render analitik, editor gambar). Bug lama impor angka-float dikonfirmasi sudah diperbaiki (impor baru bersih) & sisa data lama dibersihkan.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
