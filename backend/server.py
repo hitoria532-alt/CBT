@@ -5,15 +5,19 @@ ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
 import os
+import io
 import logging
 import uuid
+import random
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional, Any
 
 import jwt
 import bcrypt
+import pandas as pd
 from bson import ObjectId
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Request, Response, UploadFile, File
+from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pydantic import BaseModel, Field, EmailStr
@@ -157,6 +161,8 @@ class Package(BaseModel):
     category_id: Optional[str] = None
     question_ids: List[str] = []
     scoring_method: str = "percentage"  # percentage | weighted
+    shuffle_questions: bool = False
+    shuffle_options: bool = False
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -166,6 +172,8 @@ class PackageBody(BaseModel):
     category_id: Optional[str] = None
     question_ids: List[str] = []
     scoring_method: str = "percentage"
+    shuffle_questions: bool = False
+    shuffle_options: bool = False
 
 
 class Session(BaseModel):
@@ -176,6 +184,7 @@ class Session(BaseModel):
     end_time: str
     duration_minutes: int = 60
     kkm: float = 75.0
+    class_ids: List[str] = []
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -186,6 +195,21 @@ class SessionBody(BaseModel):
     end_time: str
     duration_minutes: int = 60
     kkm: float = 75.0
+    class_ids: List[str] = []
+
+
+class SchoolClass(BaseModel):
+    id: str = Field(default_factory=new_id)
+    name: str
+    description: Optional[str] = ""
+    student_ids: List[str] = []
+    created_at: str = Field(default_factory=now_iso)
+
+
+class ClassBody(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    student_ids: List[str] = []
 
 
 class StartAttemptBody(BaseModel):
@@ -391,9 +415,21 @@ async def list_sessions(user: dict = Depends(get_current_user)):
     for s in sessions:
         await enrich_session(s)
     if user["role"] == "siswa":
+        my_classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)
+        my_class_ids = {c["id"] for c in my_classes}
+        visible = []
         for s in sessions:
+            targets = s.get("class_ids") or []
+            if targets and not (set(targets) & my_class_ids):
+                continue
             att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]}, {"_id": 0})
             s["attempt_status"] = att["status"] if att else None
+            visible.append(s)
+        return visible
+    else:
+        for s in sessions:
+            classes = await db.classes.find({"id": {"$in": s.get("class_ids", [])}}, {"_id": 0, "name": 1}).to_list(100)
+            s["class_names"] = [c["name"] for c in classes]
     return sessions
 
 
@@ -417,10 +453,13 @@ async def delete_session(sid: str, user: dict = Depends(require_roles("admin", "
 
 
 # ------------------------------------------------------------------ EXAM (student)
-def sanitize_question(q: dict) -> dict:
+def sanitize_question(q: dict, perm: Optional[List[int]] = None) -> dict:
+    opts = q.get("options", [])
+    if perm and q["type"] == "pg":
+        opts = [opts[i] for i in perm if i < len(opts)]
     return {
         "id": q["id"], "type": q["type"], "text": q["text"],
-        "options": q.get("options", []), "weight": q.get("weight", 1.0),
+        "options": opts, "weight": q.get("weight", 1.0),
     }
 
 
@@ -441,18 +480,31 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
 
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
     questions = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
-    order = {qid: i for i, qid in enumerate(pkg.get("question_ids", []))}
-    questions.sort(key=lambda q: order.get(q["id"], 999))
+    qmap = {q["id"]: q for q in questions}
 
     if not attempt:
+        order_ids = list(pkg.get("question_ids", []))
+        if pkg.get("shuffle_questions"):
+            random.shuffle(order_ids)
+        option_perm = {}
+        if pkg.get("shuffle_options"):
+            for q in questions:
+                if q["type"] == "pg" and q.get("options"):
+                    idxs = list(range(len(q["options"])))
+                    random.shuffle(idxs)
+                    option_perm[q["id"]] = idxs
         attempt = {
             "id": new_id(), "session_id": body.session_id, "student_id": user["id"],
             "student_name": user["name"], "student_identifier": user.get("identifier", ""),
             "package_id": session["package_id"], "answers": {}, "status": "berlangsung",
             "score": None, "started_at": now_iso(), "submitted_at": None,
-            "needs_grading": False,
+            "needs_grading": False, "question_order": order_ids, "option_perm": option_perm,
         }
         await db.attempts.insert_one(dict(attempt))
+
+    order_ids = attempt.get("question_order") or list(pkg.get("question_ids", []))
+    option_perm = attempt.get("option_perm", {})
+    display = [sanitize_question(qmap[qid], option_perm.get(qid)) for qid in order_ids if qid in qmap]
 
     return {
         "attempt_id": attempt["id"],
@@ -460,7 +512,7 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
                     "duration_minutes": session["duration_minutes"], "end_time": session["end_time"]},
         "started_at": attempt["started_at"],
         "answers": attempt.get("answers", {}),
-        "questions": [sanitize_question(q) for q in questions],
+        "questions": display,
     }
 
 
@@ -510,9 +562,21 @@ async def submit_exam(body: SubmitBody, user: dict = Depends(require_roles("sisw
     pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
     qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
-    details, needs_grading, score, earned, total = compute_grade(pkg, qmap, body.answers)
+    # Convert shuffled option indices back to original indices for pg questions
+    perm_map = attempt.get("option_perm", {})
+    canonical = {}
+    for qid, ans in body.answers.items():
+        q = qmap.get(qid)
+        if q and q.get("type") == "pg" and qid in perm_map and ans not in (None, ""):
+            try:
+                canonical[qid] = str(perm_map[qid][int(ans)])
+            except (ValueError, IndexError, TypeError):
+                canonical[qid] = ans
+        else:
+            canonical[qid] = ans
+    details, needs_grading, score, earned, total = compute_grade(pkg, qmap, canonical)
     update = {
-        "answers": body.answers, "details": details, "needs_grading": needs_grading,
+        "answers": canonical, "details": details, "needs_grading": needs_grading,
         "score": score, "earned": earned, "total_possible": total,
         "status": "menunggu_koreksi" if needs_grading else "selesai",
         "submitted_at": now_iso(),
@@ -587,6 +651,232 @@ async def grade_essay(attempt_id: str, body: GradeEssayBody, user: dict = Depend
         "status": "menunggu_koreksi" if needs_grading else "selesai",
     }})
     return {"score": score, "needs_grading": needs_grading}
+
+
+# ------------------------------------------------------------------ CLASSES
+async def enrich_class(c: dict) -> dict:
+    c["student_count"] = len(c.get("student_ids", []))
+    return c
+
+
+@api_router.get("/classes")
+async def list_classes(user: dict = Depends(require_roles("admin", "guru"))):
+    items = await db.classes.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    for c in items:
+        await enrich_class(c)
+    return items
+
+
+@api_router.post("/classes")
+async def create_class(body: ClassBody, user: dict = Depends(require_roles("admin", "guru"))):
+    cls = SchoolClass(**body.model_dump())
+    await db.classes.insert_one(cls.model_dump())
+    return await enrich_class(cls.model_dump())
+
+
+@api_router.put("/classes/{cid}")
+async def update_class(cid: str, body: ClassBody, user: dict = Depends(require_roles("admin", "guru"))):
+    await db.classes.update_one({"id": cid}, {"$set": body.model_dump()})
+    c = await db.classes.find_one({"id": cid}, {"_id": 0})
+    return await enrich_class(c)
+
+
+@api_router.delete("/classes/{cid}")
+async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    await db.classes.delete_one({"id": cid})
+    return {"ok": True}
+
+
+# ------------------------------------------------------------------ QUESTION IMPORT
+IMPORT_TEMPLATE = (
+    "type,text,option_a,option_b,option_c,option_d,correct,weight,category\n"
+    "pg,Berapa hasil 5 + 3?,6,7,8,9,C,1,Matematika\n"
+    "truefalse,Matahari terbit dari timur.,,,,,benar,1,IPA\n"
+    "essay,Jelaskan proses fotosintesis.,,,,,,2,IPA\n"
+)
+
+
+@api_router.get("/questions/import-template")
+async def import_template(user: dict = Depends(require_roles("admin", "guru"))):
+    return StreamingResponse(
+        io.BytesIO(IMPORT_TEMPLATE.encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=template_soal.csv"},
+    )
+
+
+@api_router.post("/questions/import")
+async def import_questions(file: UploadFile = File(...), user: dict = Depends(require_roles("admin", "guru"))):
+    raw = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(io.BytesIO(raw), dtype=str)
+        else:
+            df = pd.read_csv(io.BytesIO(raw), dtype=str)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    cats = await db.categories.find({}, {"_id": 0}).to_list(1000)
+    cat_by_name = {c["name"].strip().lower(): c["id"] for c in cats}
+
+    imported = 0
+    errors = []
+    letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3"}
+    for i, row in df.iterrows():
+        rownum = i + 2
+        try:
+            qtype = str(row.get("type", "")).strip().lower()
+            text = str(row.get("text", "")).strip()
+            if not text or text.lower() == "nan" or qtype not in ("pg", "truefalse", "essay"):
+                errors.append(f"Baris {rownum}: tipe/teks tidak valid")
+                continue
+            # category
+            cat_name = str(row.get("category", "")).strip()
+            cat_id = None
+            if cat_name and cat_name.lower() != "nan":
+                key = cat_name.lower()
+                if key not in cat_by_name:
+                    nc = Category(name=cat_name)
+                    await db.categories.insert_one(nc.model_dump())
+                    cat_by_name[key] = nc.id
+                cat_id = cat_by_name[key]
+            weight = 1.0
+            try:
+                wv = str(row.get("weight", "") or "").strip()
+                weight = float(wv) if wv and wv.lower() != "nan" else 1.0
+            except (ValueError, TypeError):
+                weight = 1.0
+            if weight != weight:  # NaN guard
+                weight = 1.0
+
+            options, correct = [], None
+            if qtype == "pg":
+                for col in ("option_a", "option_b", "option_c", "option_d"):
+                    v = row.get(col, "")
+                    v = "" if (v is None or str(v).lower() == "nan") else str(v).strip()
+                    if v:
+                        options.append(v)
+                raw_c = str(row.get("correct", "")).strip().lower()
+                if raw_c in letter_idx:
+                    correct = letter_idx[raw_c]
+                elif raw_c.isdigit():
+                    correct = raw_c
+                else:
+                    errors.append(f"Baris {rownum}: kunci PG tidak valid")
+                    continue
+            elif qtype == "truefalse":
+                raw_c = str(row.get("correct", "")).strip().lower()
+                correct = "true" if raw_c in ("true", "benar", "b", "1") else "false"
+
+            ques = Question(category_id=cat_id, type=qtype, text=text,
+                            options=options, correct_answer=correct, weight=weight)
+            await db.questions.insert_one(ques.model_dump())
+            imported += 1
+        except Exception as e:
+            errors.append(f"Baris {rownum}: {e}")
+
+    return {"imported": imported, "errors": errors}
+
+
+# ------------------------------------------------------------------ RESULT PDF
+@api_router.get("/results/detail/{attempt_id}/pdf")
+async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle)
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    attempt = await db.attempts.find_one({"id": attempt_id}, {"_id": 0})
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Tidak ditemukan")
+    if user["role"] == "siswa" and attempt["student_id"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+
+    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
+    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    qmap = {q["id"]: q for q in qlist}
+    session = await db.sessions.find_one({"id": attempt["session_id"]}, {"_id": 0})
+    kkm = session.get("kkm", 75) if session else 75
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm,
+                            leftMargin=18 * mm, rightMargin=18 * mm)
+    styles = getSampleStyleSheet()
+    green = colors.HexColor("#1e3a30")
+    terra = colors.HexColor("#c0563f")
+    h = ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)
+    sub = ParagraphStyle("sub", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
+    label = ParagraphStyle("lbl", parent=styles["Normal"], fontSize=9, textColor=colors.grey)
+    val = ParagraphStyle("val", parent=styles["Normal"], fontSize=11)
+
+    elems = []
+    elems.append(Paragraph("KARTU HASIL UJIAN", h))
+    elems.append(Paragraph("Computer Based Test", sub))
+    elems.append(Spacer(1, 10 * mm))
+
+    passed = attempt.get("score") is not None and attempt["score"] >= kkm
+    score_txt = str(attempt["score"]) if attempt.get("score") is not None else "Menunggu Koreksi"
+    info = [
+        ["Nama Siswa", attempt.get("student_name", "-"), "Nilai Akhir", score_txt],
+        ["NISN / NIP", attempt.get("student_identifier") or "-", "KKM", str(kkm)],
+        ["Sesi Ujian", session["title"] if session else "-", "Status",
+         "LULUS" if passed else ("BELUM LULUS" if attempt.get("score") is not None else "-")],
+        ["Metode Nilai", "Berbobot" if pkg.get("scoring_method") == "weighted" else "Persentase",
+         "Poin", f"{attempt.get('earned', 0)}/{attempt.get('total_possible', 0)}"],
+    ]
+    t = Table(info, colWidths=[32 * mm, 60 * mm, 28 * mm, 46 * mm])
+    t.setStyle(TableStyle([
+        ("FONTSIZE", (0, 0), (-1, -1), 9),
+        ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+        ("TEXTCOLOR", (2, 0), (2, -1), colors.grey),
+        ("TEXTCOLOR", (3, 0), (3, 0), terra if not passed else green),
+        ("FONTNAME", (3, 0), (3, 0), "Helvetica-Bold"),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8")),
+    ]))
+    elems.append(t)
+    elems.append(Spacer(1, 8 * mm))
+
+    elems.append(Paragraph("Rincian Jawaban", ParagraphStyle("s2", parent=styles["Heading2"], textColor=green, fontSize=12)))
+    elems.append(Spacer(1, 3 * mm))
+
+    rows = [["No", "Soal", "Tipe", "Poin", "Hasil"]]
+    tlabel = {"pg": "PG", "truefalse": "B/S", "essay": "Esai"}
+    for i, d in enumerate(attempt.get("details", [])):
+        q = qmap.get(d["question_id"], {})
+        qtext = (q.get("text") or "")[:70] + ("..." if len(q.get("text") or "") > 70 else "")
+        if d.get("type") == "essay":
+            res = "Menunggu" if d.get("needs_grading") else "Dinilai"
+        else:
+            res = "Benar" if d.get("is_correct") else "Salah"
+        rows.append([str(i + 1), Paragraph(qtext, ParagraphStyle("c", fontSize=8)),
+                     tlabel.get(d.get("type"), "-"),
+                     f"{d.get('points_earned', 0)}/{d.get('points_possible', 0)}", res])
+    dt = Table(rows, colWidths=[10 * mm, 92 * mm, 16 * mm, 22 * mm, 22 * mm], repeatRows=1)
+    dt.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), green),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f6f0")]),
+        ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8")),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("TOPPADDING", (0, 0), (-1, -1), 4),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
+    ]))
+    elems.append(dt)
+    elems.append(Spacer(1, 10 * mm))
+    elems.append(Paragraph(f"Dicetak pada {datetime.now(timezone.utc).strftime('%d-%m-%Y %H:%M UTC')}", sub))
+
+    doc.build(elems)
+    buf.seek(0)
+    fname = f"hasil-{attempt.get('student_name', 'siswa')}.pdf".replace(" ", "_")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
 
 
 # ------------------------------------------------------------------ DASHBOARD

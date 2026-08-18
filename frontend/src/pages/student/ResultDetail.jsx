@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ArrowLeft, CheckCircle2, XCircle, Clock } from "lucide-react";
+import { ArrowLeft, CheckCircle2, XCircle, Clock, Download } from "lucide-react";
 import api from "../../lib/api";
 import { QTYPE_LABEL } from "../../lib/utils2";
 import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
 
 export default function ResultDetail() {
   const { attemptId } = useParams();
@@ -13,13 +14,22 @@ export default function ResultDetail() {
 
   useEffect(() => { api.get(`/results/detail/${attemptId}`).then((r) => setA(r.data)); }, [attemptId]);
 
+  const downloadPdf = async () => {
+    const res = await api.get(`/results/detail/${attemptId}/pdf`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    const el = document.createElement("a"); el.href = url; el.download = "kartu-hasil.pdf"; el.click();
+  };
+
   if (!a) return <div className="text-muted-foreground">Memuat...</div>;
 
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} data-testid="result-detail">
-      <button onClick={() => nav("/hasil")} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
-        <ArrowLeft className="h-4 w-4" /> Kembali
-      </button>
+      <div className="flex items-center justify-between mb-6">
+        <button onClick={() => nav("/hasil")} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground">
+          <ArrowLeft className="h-4 w-4" /> Kembali
+        </button>
+        <Button variant="outline" onClick={downloadPdf} data-testid="download-pdf-btn"><Download className="h-4 w-4 mr-2" />Unduh Kartu Hasil (PDF)</Button>
+      </div>
 
       <div className="bg-card border border-border rounded-md p-8 mb-8 flex items-center justify-between gap-6 flex-wrap">
         <div>

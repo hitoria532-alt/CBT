@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download } from "lucide-react";
-import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -56,6 +55,12 @@ export default function Results() {
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
     a.href = url; a.download = `hasil-${active.title}.csv`; a.click();
+  };
+
+  const downloadPdf = async (attemptId) => {
+    const res = await api.get(`/results/detail/${attemptId}/pdf`, { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    const el = document.createElement("a"); el.href = url; el.download = "kartu-hasil.pdf"; el.click();
   };
 
   // ---- Detail (grade) view
@@ -145,6 +150,7 @@ export default function Results() {
                   <TableCell className="font-semibold">{a.score != null ? a.score : "—"}</TableCell>
                   <TableCell className="text-muted-foreground">{fmtDateTime(a.submitted_at)}</TableCell>
                   <TableCell className="text-right">
+                    <Button size="sm" variant="ghost" onClick={() => downloadPdf(a.id)} data-testid={`pdf-btn-${a.id}`} className="mr-1"><Download className="h-4 w-4" /></Button>
                     <Button size="sm" variant={a.status === "menunggu_koreksi" ? "default" : "outline"} onClick={() => openGrade(a)} data-testid={`grade-btn-${a.id}`}>
                       {a.status === "menunggu_koreksi" ? "Koreksi" : "Lihat"}
                     </Button>

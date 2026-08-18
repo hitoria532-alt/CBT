@@ -9,6 +9,7 @@ import { Label } from "../../components/ui/label";
 import { Textarea } from "../../components/ui/textarea";
 import { Badge } from "../../components/ui/badge";
 import { Checkbox } from "../../components/ui/checkbox";
+import { Switch } from "../../components/ui/switch";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../../components/ui/select";
@@ -16,7 +17,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage" };
+const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false };
 
 export default function Packages() {
   const [items, setItems] = useState([]);
@@ -37,7 +38,8 @@ export default function Packages() {
   const openEdit = (p) => {
     setEditing(p);
     setForm({ title: p.title, description: p.description || "", category_id: p.category_id || "",
-      question_ids: p.question_ids || [], scoring_method: p.scoring_method || "percentage" });
+      question_ids: p.question_ids || [], scoring_method: p.scoring_method || "percentage",
+      shuffle_questions: !!p.shuffle_questions, shuffle_options: !!p.shuffle_options });
     setOpen(true);
   };
 
@@ -92,6 +94,8 @@ export default function Packages() {
               <div className="flex gap-2 flex-wrap">
                 <Badge className="bg-primary/10 text-primary border-0">{p.question_count} Soal</Badge>
                 <Badge variant="outline">{p.scoring_method === "weighted" ? "Berbobot" : "Persentase"}</Badge>
+                {p.shuffle_questions && <Badge variant="outline">Soal Acak</Badge>}
+                {p.shuffle_options && <Badge variant="outline">Opsi Acak</Badge>}
               </div>
             </div>
           ))}
@@ -130,6 +134,23 @@ export default function Packages() {
                     <SelectItem value="weighted">Berbobot per soal</SelectItem>
                   </SelectContent>
                 </Select>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4 rounded-md border border-border p-4">
+              <div className="flex items-center justify-between gap-3 col-span-2 sm:col-span-1">
+                <div>
+                  <Label>Acak Urutan Soal</Label>
+                  <p className="text-xs text-muted-foreground">Beda urutan tiap siswa</p>
+                </div>
+                <Switch checked={form.shuffle_questions} onCheckedChange={(v) => setForm({ ...form, shuffle_questions: v })} data-testid="shuffle-questions-switch" />
+              </div>
+              <div className="flex items-center justify-between gap-3 col-span-2 sm:col-span-1">
+                <div>
+                  <Label>Acak Opsi Jawaban</Label>
+                  <p className="text-xs text-muted-foreground">Untuk soal pilihan ganda</p>
+                </div>
+                <Switch checked={form.shuffle_options} onCheckedChange={(v) => setForm({ ...form, shuffle_options: v })} data-testid="shuffle-options-switch" />
               </div>
             </div>
 

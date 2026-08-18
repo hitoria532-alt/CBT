@@ -1,6 +1,6 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, FileQuestion } from "lucide-react";
+import { Plus, Pencil, Trash2, FileQuestion, Upload, Download } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
@@ -24,6 +24,32 @@ export default function Questions() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const fileRef = useRef();
+
+  const reloadCats = () => api.get("/categories").then((r) => setCats(r.data));
+
+  const downloadTemplate = async () => {
+    const res = await api.get("/questions/import-template", { responseType: "blob" });
+    const url = URL.createObjectURL(res.data);
+    const a = document.createElement("a"); a.href = url; a.download = "template_soal.csv"; a.click();
+  };
+
+  const doImport = async (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const fd = new FormData();
+    fd.append("file", f);
+    setImporting(true);
+    try {
+      const { data } = await api.post("/questions/import", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      toast.success(`${data.imported} soal berhasil diimpor`);
+      if (data.errors?.length) toast.warning(`${data.errors.length} baris dilewati`);
+      setImportOpen(false); load(); reloadCats();
+    } catch (err) { toast.error(apiError(err)); }
+    finally { setImporting(false); if (fileRef.current) fileRef.current.value = ""; }
+  };
 
   const load = () => api.get("/questions").then((r) => setItems(r.data));
   useEffect(() => { load(); api.get("/categories").then((r) => setCats(r.data)); }, []);
@@ -87,6 +113,7 @@ export default function Questions() {
               {cats.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
             </SelectContent>
           </Select>
+          <Button variant="outline" onClick={() => setImportOpen(true)} data-testid="import-question-btn"><Upload className="h-4 w-4 mr-2" />Impor</Button>
           <Button onClick={openNew} data-testid="add-question-btn"><Plus className="h-4 w-4 mr-2" />Tambah Soal</Button>
         </div>
       </div>
@@ -205,6 +232,30 @@ export default function Questions() {
             <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
             <Button onClick={save} data-testid="save-question-btn">Simpan</Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>Impor Soal Massal</DialogTitle></DialogHeader>
+          <div className="space-y-4 py-2">
+            <p className="text-sm text-muted-foreground leading-relaxed">
+              Unggah file <b>CSV</b> atau <b>Excel (.xlsx)</b> dengan kolom:
+              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, correct, weight, category</code>
+            </p>
+            <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
+              <li><b>type</b>: pg / truefalse / essay</li>
+              <li><b>correct</b>: untuk PG isi A/B/C/D · untuk B/S isi benar/salah</li>
+              <li><b>category</b>: nama kategori (dibuat otomatis bila belum ada)</li>
+            </ul>
+            <Button variant="outline" onClick={downloadTemplate} className="w-full" data-testid="download-template-btn">
+              <Download className="h-4 w-4 mr-2" />Unduh Template CSV
+            </Button>
+            <input ref={fileRef} type="file" accept=".csv,.xlsx,.xls" onChange={doImport} className="hidden" data-testid="import-file-input" />
+            <Button onClick={() => fileRef.current?.click()} disabled={importing} className="w-full" data-testid="upload-file-btn">
+              <Upload className="h-4 w-4 mr-2" />{importing ? "Mengimpor..." : "Pilih File & Impor"}
+            </Button>
+          </div>
         </DialogContent>
       </Dialog>
     </div>

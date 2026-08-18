@@ -11,6 +11,7 @@ import Categories from "./pages/admin/Categories";
 import Questions from "./pages/admin/Questions";
 import Packages from "./pages/admin/Packages";
 import Sessions from "./pages/admin/Sessions";
+import Classes from "./pages/admin/Classes";
 import Results from "./pages/admin/Results";
 import Accounts from "./pages/admin/Accounts";
 import StudentHome from "./pages/student/StudentHome";
@@ -66,6 +67,7 @@ function App() {
               <Route path="soal" element={<Questions />} />
               <Route path="paket" element={<Packages />} />
               <Route path="sesi" element={<Sessions />} />
+              <Route path="kelas" element={<Classes />} />
               <Route path="hasil" element={<Results />} />
               <Route path="akun" element={<Accounts />} />
             </Route>

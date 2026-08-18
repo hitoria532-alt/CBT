@@ -1,0 +1,43 @@
+{
+  "summary": "Tested 4 new iteration-2 features (Impor Soal, Acak Soal, Manajemen Kelas, Kartu Hasil PDF) plus regression. Backend pytest: 11/14 passed, 1 skipped (test-ordering, not a bug), 2 FAILED - both revealing real backend defects in /api/questions/import (see below). Frontend smoke test verified all new data-testid selectors exist and work: classes-page, add-class-btn, class-name-input, save-class-btn, pick-student-*, import-question-btn, download-template-btn, upload-file-btn, import-file-input, shuffle-questions-switch, shuffle-options-switch, pick-class-* (with 'Kelas Peserta' label), pdf-btn-* (in session detail table). Shuffle grading correctness verified end-to-end: created 4-PG package with shuffle_questions+shuffle_options ON, fresh student got shuffled displayed options, submitted using displayed indices matching correct option text, backend converted displayed->original via option_perm and scored exactly 100.0 - grading with shuffled options works. Class filtering for /api/sessions verified: siswa in class sees class-restricted session, non-member does not, open (no class) session visible to all. PDF endpoint returns application/pdf with valid %PDF header, siswa can download own attempt but gets 403 on others; admin can download any.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/questions/import", "issue": "Numeric PG options are coerced to float by pandas. CSV row with options 3,4,5,6 gets stored as ['3.0','4.0','5.0','6.0'] instead of ['3','4','5','6']. Reason: pandas.read_csv infers column dtype as float when any NaN present; str(3.0) -> '3.0'. Students will see '3.0' etc which is ugly for math/numeric answer keys. Fix: coerce with dtype=str or handle numeric->int-string in the option loop (e.g. if float and int()==float() use int str)."},
+      {"endpoint": "POST /api/questions/import", "issue": "Empty 'text' cell is not rejected. Pandas turns empty CSV cell into NaN and code does str(NaN).strip() -> 'nan' which is truthy, so a row with blank text gets imported with text='nan'. Fix: also check `text.lower() != 'nan'` (already done for category, missing for text)."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin Dashboard chart", "issues": ["Pre-existing harmless Recharts width(-1) height(-1) warning on initial mount (already reported prev iteration)"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_new_features.py",
+    "/app/backend/tests/test_cbt_api.py",
+    "/app/test_reports/pytest/pytest_new_features.xml"
+  ],
+  "action_items": [
+    "Fix /api/questions/import numeric-option coercion (dtype=str on read_csv/read_excel, or coerce ints back).",
+    "Fix /api/questions/import to treat NaN 'text' cell as empty and skip the row."
+  ],
+  "critical_code_review_comments": [
+    "server.py grew to ~930 lines - increasingly worth splitting into routers (auth, users, content, exam, results, import, classes).",
+    "list_sessions performs N+1 queries: for each session it does db.classes.find with $in. Fine for small counts but consider aggregating.",
+    "start_exam does not persist a submitted-at 'expires' timestamp; a client that never submits will remain 'berlangsung' forever - no server-side auto-submit on end_time.",
+    "compute_grade returns 5-tuple - would benefit from a dataclass/pydantic model.",
+    "PDF endpoint does not sanitize filename beyond space replacement (student_name could contain slashes) - low risk but Content-Disposition injection theoretically possible."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_new_features.py (new)"
+  ],
+  "success_rate": {"backend": "78% (11/14, 2 real defects, 1 test-order skip)", "frontend": "100% for tested selectors"},
+  "test_credentials": "Admin hitoria532@gmail.com/admin123, Guru guru@sekolah.id/guru123, Siswa siswa@sekolah.id/siswa123",
+  "seed_data_creation": "All test data is prefixed TEST_ and cleaned up in fixtures. Note: one stray question with text='nan' + category 'X' from test_import_invalid_rows_reported was inserted due to the bug itself (would-be error rows leaked in). Admin can delete manually if desired; not seed-critical.",
+  "retest_needed": true,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Two /api/questions/import defects need retest after fix: (1) numeric options become float strings, (2) NaN text row not rejected. Test file /app/backend/tests/test_new_features.py covers both. Shuffle+grading correctness is fully verified (option_perm decode at submit works). Class filtering for /api/sessions verified for both member/non-member and open sessions. PDF endpoint verified 200 + application/pdf + %PDF header. UI selectors all present. To run tests: `export REACT_APP_BACKEND_URL=<from frontend/.env>; pytest backend/tests/test_new_features.py -o addopts=''` (project pytest.ini uses xdist scoping - the -o addopts='' disables it for single-file runs).",
+  "rca of the issue": "Bug 1 (numeric options -> float): pandas.read_csv/read_excel infers dtype per column. When option_a column has some numeric values and some NaN, dtype becomes float64. Later str(3.0) == '3.0'. Bug 2 (nan text): the code correctly filters 'nan' for the category cell (line ~738) but forgets to do the same for the text cell (line ~731 uses `str(row.get('text','')).strip()`). Both fixable in ~4 LOC in import_questions()."
+}

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="2" skipped="1" tests="14" time="14.918" timestamp="2026-08-18T15:37:11.303345+00:00" hostname="agent-env-b11a7460-dadf-4672-8b54-9c3cd7b6f18b"><testcase classname="tests.test_new_features.TestImportSoal" name="test_import_template_download" time="0.788" /><testcase classname="tests.test_new_features.TestImportSoal" name="test_import_valid_csv" time="0.552"><failure message="AssertionError: assert ['3.0', '4.0', '5.0', '6.0'] == ['3', '4', '5', '6']&#10;  &#10;  At index 0 diff: '3.0' != '3'&#10;  &#10;  Full diff:&#10;    [&#10;  -     '3',&#10;  +     '3.0',...&#10;  &#10;  ...Full output truncated (11 lines hidden), use '-vv' to show">backend/tests/test_new_features.py:70: in test_import_valid_csv
+    assert pg["options"] == ["3", "4", "5", "6"]
+E   AssertionError: assert ['3.0', '4.0', '5.0', '6.0'] == ['3', '4', '5', '6']
+E     
+E     At index 0 diff: '3.0' != '3'
+E     
+E     Full diff:
+E       [
+E     -     '3',
+E     +     '3.0',...
+E     
+E     ...Full output truncated (11 lines hidden), use '-vv' to show</failure></testcase><testcase classname="tests.test_new_features.TestImportSoal" name="test_import_invalid_rows_reported" time="0.140"><failure message="assert 1 == 0">backend/tests/test_new_features.py:93: in test_import_invalid_rows_reported
+    assert d["imported"] == 0
+E   assert 1 == 0</failure></testcase><testcase classname="tests.test_new_features.TestImportSoal" name="test_import_siswa_forbidden" time="0.527" /><testcase classname="tests.test_new_features.TestShuffle" name="test_shuffle_stable_on_resume" time="3.240" /><testcase classname="tests.test_new_features.TestShuffle" name="test_shuffle_grading_with_option_perm" time="0.278" /><testcase classname="tests.test_new_features.TestShuffle" name="test_two_students_can_get_different_orders" time="1.705"><skipped type="pytest.skip" message="Second student already submitted; cannot compare orders">/app/backend/tests/test_new_features.py:217: Second student already submitted; cannot compare orders</skipped></testcase><testcase classname="tests.test_new_features.TestClasses" name="test_class_crud_and_session_filter" time="4.326" /><testcase classname="tests.test_new_features.TestClasses" name="test_siswa_cannot_list_classes" time="0.517" /><testcase classname="tests.test_new_features.TestResultPDF" name="test_pdf_download_admin" time="0.502" /><testcase classname="tests.test_new_features.TestResultPDF" name="test_pdf_student_own_only" time="1.039" /><testcase classname="tests.test_new_features.TestRegression" name="test_admin_login" time="0.374" /><testcase classname="tests.test_new_features.TestRegression" name="test_guru_login" time="0.400" /><testcase classname="tests.test_new_features.TestRegression" name="test_siswa_login" time="0.403" /></testsuite></testsuites>

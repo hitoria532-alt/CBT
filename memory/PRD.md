@@ -32,6 +32,13 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - Laporan hasil: dashboard admin (stats+chart), hasil per sesi + export CSV, detail jawaban siswa
 - Verified: 20/20 backend tests + frontend E2E pass. Weighted math verified.
 
+## Implemented (2026-08-18) — Iteration 2
+- **Impor Soal**: impor massal bank soal dari CSV/Excel (template unduh, auto-buat kategori). Bug numeric-option & blank-row diperbaiki.
+- **Acak Soal**: opsi paket acak urutan soal & opsi jawaban per siswa (stabil per attempt, grading tetap benar via option_perm decode saat submit).
+- **Manajemen Kelas**: kelola rombel + anggota siswa; sesi bisa ditargetkan ke kelas tertentu (kosong = semua siswa), siswa hanya melihat sesi kelasnya.
+- **Kartu Hasil PDF**: unduh kartu hasil ujian (reportlab) untuk siswa & admin/guru.
+- Verified: shuffle+grading E2E benar, class filtering benar, PDF 200 application/pdf, semua selektor UI ada.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus

@@ -7,6 +7,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
+import { Checkbox } from "../../components/ui/checkbox";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../../components/ui/select";
@@ -14,7 +15,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75 };
+const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75, class_ids: [] };
 
 const statusColor = {
   akan_datang: "bg-secondary/20 text-secondary-foreground",
@@ -25,21 +26,30 @@ const statusColor = {
 export default function Sessions() {
   const [items, setItems] = useState([]);
   const [packages, setPackages] = useState([]);
+  const [classes, setClasses] = useState([]);
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
 
   const load = () => api.get("/sessions").then((r) => setItems(r.data));
-  useEffect(() => { load(); api.get("/packages").then((r) => setPackages(r.data)); }, []);
+  useEffect(() => {
+    load();
+    api.get("/packages").then((r) => setPackages(r.data));
+    api.get("/classes").then((r) => setClasses(r.data));
+  }, []);
 
   const openNew = () => { setEditing(null); setForm(EMPTY); setOpen(true); };
   const openEdit = (s) => {
     setEditing(s);
     setForm({ title: s.title, package_id: s.package_id,
       start_time: toLocalInput(s.start_time), end_time: toLocalInput(s.end_time),
-      duration_minutes: s.duration_minutes, kkm: s.kkm });
+      duration_minutes: s.duration_minutes, kkm: s.kkm, class_ids: s.class_ids || [] });
     setOpen(true);
   };
+
+  const toggleClass = (id) => setForm((f) => ({
+    ...f, class_ids: f.class_ids.includes(id) ? f.class_ids.filter((x) => x !== id) : [...f.class_ids, id],
+  }));
 
   const save = async () => {
     if (!form.title.trim() || !form.package_id || !form.start_time || !form.end_time)
@@ -47,7 +57,7 @@ export default function Sessions() {
     const payload = {
       title: form.title, package_id: form.package_id,
       start_time: fromLocalInput(form.start_time), end_time: fromLocalInput(form.end_time),
-      duration_minutes: Number(form.duration_minutes), kkm: Number(form.kkm),
+      duration_minutes: Number(form.duration_minutes), kkm: Number(form.kkm), class_ids: form.class_ids,
     };
     try {
       if (editing) await api.put(`/sessions/${editing.id}`, payload);
@@ -88,6 +98,7 @@ export default function Sessions() {
                   <p>Paket: <span className="text-foreground">{s.package_title}</span> · {s.question_count} soal</p>
                   <p>{fmtDateTime(s.start_time)} — {fmtDateTime(s.end_time)}</p>
                   <p>Durasi {s.duration_minutes} menit · KKM {s.kkm}</p>
+                  <p>Kelas: {s.class_names?.length ? s.class_names.join(", ") : "Semua siswa"}</p>
                 </div>
               </div>
               <div className="flex gap-1">
@@ -135,6 +146,21 @@ export default function Sessions() {
                 <Label>KKM</Label>
                 <Input type="number" min="0" max="100" value={form.kkm} onChange={(e) => setForm({ ...form, kkm: e.target.value })} />
               </div>
+            </div>
+            <div className="space-y-2">
+              <Label>Kelas Peserta {form.class_ids.length === 0 && <span className="text-muted-foreground font-normal">(kosong = semua siswa)</span>}</Label>
+              {classes.length === 0 ? (
+                <p className="text-xs text-muted-foreground">Belum ada kelas. Tambahkan di menu Kelas.</p>
+              ) : (
+                <div className="border border-border rounded-md max-h-36 overflow-y-auto divide-y divide-border">
+                  {classes.map((c) => (
+                    <label key={c.id} className="flex items-center gap-3 p-2.5 hover:bg-muted/40 cursor-pointer" data-testid={`pick-class-${c.id}`}>
+                      <Checkbox checked={form.class_ids.includes(c.id)} onCheckedChange={() => toggleClass(c.id)} />
+                      <span className="text-sm">{c.name} <span className="text-muted-foreground">({c.student_count} siswa)</span></span>
+                    </label>
+                  ))}
+                </div>
+              )}
             </div>
           </div>
           <DialogFooter>

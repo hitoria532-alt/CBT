@@ -1,7 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import {
   LayoutDashboard, FolderTree, FileQuestion, Package, CalendarClock,
-  ClipboardCheck, Users, LogOut, GraduationCap, Menu, X,
+  ClipboardCheck, Users, LogOut, GraduationCap, Menu, X, School,
 } from "lucide-react";
 import { useState } from "react";
 import { useAuth } from "../context/AuthContext";
@@ -14,6 +14,7 @@ const LINKS = [
   { to: "/admin/soal", label: "Bank Soal", icon: FileQuestion },
   { to: "/admin/paket", label: "Paket Soal", icon: Package },
   { to: "/admin/sesi", label: "Sesi Pelaksanaan", icon: CalendarClock },
+  { to: "/admin/kelas", label: "Manajemen Kelas", icon: School },
   { to: "/admin/hasil", label: "Hasil & Koreksi", icon: ClipboardCheck },
   { to: "/admin/akun", label: "Manajemen Akun", icon: Users, adminOnly: true },
 ];
