@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Users, Search, Download } from "lucide-react";
+import { Plus, Pencil, Trash2, Users, Search, Download, FileText } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -62,6 +62,15 @@ export default function Classes() {
     } catch (e) { toast.error(apiError(e)); }
   };
 
+  const downloadClassReport = async (c) => {
+    try {
+      const res = await api.get(`/report/class/${c.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a"); a.href = url; a.download = `rapor-kelas-${c.name}.pdf`; a.click();
+      toast.success("Rapor kelas diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   const filtered = students.filter((s) =>
     s.name.toLowerCase().includes(q.toLowerCase()) || (s.identifier || "").includes(q));
 
@@ -91,11 +100,16 @@ export default function Classes() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mt-1 mb-4">{c.description || "Tanpa deskripsi"}</p>
-              <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
                 <Badge className="bg-primary/10 text-primary border-0">{c.student_count} siswa</Badge>
-                <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
-                  <Download className="h-4 w-4 mr-1.5" />Rekap Nilai
-                </Button>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
+                    <Download className="h-4 w-4 mr-1.5" />Rekap
+                  </Button>
+                  <Button size="sm" variant="outline" onClick={() => downloadClassReport(c)} data-testid={`class-report-${c.id}`}>
+                    <FileText className="h-4 w-4 mr-1.5" />Rapor
+                  </Button>
+                </div>
               </div>
             </div>
           ))}

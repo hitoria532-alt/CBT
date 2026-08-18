@@ -1181,6 +1181,97 @@ async def student_report_pdf(student_id: str, user: dict = Depends(get_current_u
                              headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+# ------------------------------------------------------------------ CLASS REPORT PDF (bulk)
+@api_router.get("/report/class/{class_id}/pdf")
+async def class_report_pdf(class_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    sids = cls.get("student_ids", [])
+    students = []
+    if sids:
+        docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in sids]}}).to_list(2000)
+        students = sorted(docs, key=lambda u: u["name"].lower())
+    pkgs = await db.packages.find({}, {"_id": 0, "id": 1, "category_id": 1}).to_list(2000)
+    pkg_cat = {p["id"]: p.get("category_id") for p in pkgs}
+    cats = await db.categories.find({}, {"_id": 0}).to_list(1000)
+    cat_name = {c["id"]: c["name"] for c in cats}
+
+    green = colors.HexColor("#1e3a30")
+    styles = getSampleStyleSheet()
+    sub = ParagraphStyle("sub", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
+    name_style = ParagraphStyle("nm", parent=styles["Heading1"], textColor=green, fontSize=15)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
+    elems = [Paragraph(f"RAPOR KELAS {cls['name'].upper()}", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
+             Paragraph(f"{len(students)} siswa · Computer Based Test", sub), Spacer(1, 8 * mm)]
+    if not students:
+        elems.append(Paragraph("Belum ada siswa di kelas ini.", styles["Normal"]))
+
+    for i, stu in enumerate(students):
+        if i > 0:
+            elems.append(PageBreak())
+        sid = str(stu["_id"])
+        attempts = await db.attempts.find({"student_id": sid, "status": {"$ne": "berlangsung"}}, {"_id": 0}).sort("submitted_at", 1).to_list(2000)
+        rows_data, scores, labels = [], [], []
+        for a in attempts:
+            s = await db.sessions.find_one({"id": a["session_id"]}, {"_id": 0})
+            subj = cat_name.get(pkg_cat.get(a.get("package_id")), "Umum")
+            kkm = s.get("kkm", 75) if s else 75
+            sc = a.get("score")
+            status = "Lulus" if (sc is not None and sc >= kkm) else ("Belum Lulus" if sc is not None else "Menunggu")
+            rows_data.append([s["title"] if s else "-", subj, str(sc) if sc is not None else "-", str(kkm), status])
+            if sc is not None:
+                scores.append(sc)
+                labels.append((s["title"] if s else "-")[:10])
+        elems.append(Paragraph(f"Rapor: {stu['name']}", name_style))
+        avg = round(sum(scores) / len(scores), 1) if scores else 0
+        info = [["Nama", stu["name"], "Rata-rata", str(avg)],
+                ["NISN/NIP", stu.get("identifier", "") or "-", "Total Ujian", str(len(scores))]]
+        t = Table(info, colWidths=[28 * mm, 64 * mm, 28 * mm, 42 * mm])
+        t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+                               ("TEXTCOLOR", (2, 0), (2, -1), colors.grey), ("FONTNAME", (3, 0), (3, 0), "Helvetica-Bold"),
+                               ("TEXTCOLOR", (3, 0), (3, 0), green), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                               ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8"))]))
+        elems += [t, Spacer(1, 5 * mm)]
+        if scores:
+            d = Drawing(460, 170)
+            bc = VerticalBarChart()
+            bc.x, bc.y, bc.height, bc.width = 30, 15, 135, 420
+            bc.data = [scores]
+            bc.categoryAxis.categoryNames = labels
+            bc.categoryAxis.labels.fontSize = 6
+            bc.categoryAxis.labels.angle = 30
+            bc.categoryAxis.labels.dy = -6
+            bc.valueAxis.valueMin, bc.valueAxis.valueMax, bc.valueAxis.valueStep = 0, 100, 20
+            bc.bars[0].fillColor = green
+            d.add(bc)
+            elems += [d, Spacer(1, 4 * mm)]
+        trows = [["Sesi Ujian", "Mapel", "Nilai", "KKM", "Status"]] + (rows_data or [["Belum ada ujian", "-", "-", "-", "-"]])
+        dt = Table(trows, colWidths=[70 * mm, 40 * mm, 20 * mm, 18 * mm, 26 * mm], repeatRows=1)
+        dt.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), green), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                                ("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                                ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f6f0")]),
+                                ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8")),
+                                ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+        elems.append(dt)
+
+    doc.build(elems)
+    buf.seek(0)
+    fname = f"rapor-kelas-{cls['name']}.pdf".replace(" ", "_")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
 # ------------------------------------------------------------------ AUTO-SUBMIT (cron)
 async def run_auto_submit():
     now = datetime.now(timezone.utc)

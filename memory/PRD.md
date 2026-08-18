@@ -78,6 +78,10 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Bank Soal Publik**: paket punya `created_by` + `is_public`; guru melihat paket sendiri + publik + legacy; toggle "Bagikan ke Guru Lain". Edit/Hapus hanya pemilik/admin (403 untuk non-pemilik) — bug delete tanpa cek kepemilikan sudah diperbaiki & diverifikasi (403/200/404).
 - Verified: setelah fix, permission delete/update paket benar; PDF rapor 200 (admin/self) & 403 (siswa lain).
 
+## Implemented (2026-08-18) — Iteration 10
+- **Rapor Kelas Massal**: `/api/report/class/{id}/pdf` (admin/guru) — satu file PDF berisi rapor semua siswa satu kelas (tiap siswa 1 halaman: identitas, rata-rata, grafik perkembangan, tabel rincian). Tombol "Rapor" pada tiap kartu kelas di Manajemen Kelas.
+- Verified: endpoint 200 application/pdf (%PDF valid), siswa ditolak 403; Classes.jsx parse OK.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
