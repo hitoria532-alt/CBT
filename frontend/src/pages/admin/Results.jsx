@@ -1,0 +1,189 @@
+import { useEffect, useState } from "react";
+import { toast } from "sonner";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download } from "lucide-react";
+import api, { apiError } from "../../lib/api";
+import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
+import { Button } from "../../components/ui/button";
+import { Input } from "../../components/ui/input";
+import { Label } from "../../components/ui/label";
+import { Badge } from "../../components/ui/badge";
+import {
+  Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
+} from "../../components/ui/table";
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
+} from "../../components/ui/dialog";
+
+export default function Results() {
+  const [sessions, setSessions] = useState([]);
+  const [active, setActive] = useState(null);
+  const [data, setData] = useState(null);
+  const [grading, setGrading] = useState(null); // attempt detail being graded
+  const [scores, setScores] = useState({});
+
+  useEffect(() => { api.get("/sessions").then((r) => setSessions(r.data)); }, []);
+
+  const openSession = async (s) => {
+    setActive(s);
+    const r = await api.get(`/results/session/${s.id}`);
+    setData(r.data);
+  };
+
+  const openGrade = async (attempt) => {
+    const r = await api.get(`/results/detail/${attempt.id}`);
+    setGrading(r.data);
+    const init = {};
+    r.data.details.filter((d) => d.type === "essay").forEach((d) => { init[d.question_id] = d.points_earned ?? 0; });
+    setScores(init);
+  };
+
+  const submitGrade = async () => {
+    try {
+      await api.post(`/results/grade/${grading.id}`, { scores });
+      toast.success("Nilai esai tersimpan");
+      setGrading(null);
+      openSession(active);
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
+  const exportCSV = () => {
+    const rows = [["Nama", "NISN/NIP", "Status", "Nilai", "Waktu Kumpul"]];
+    data.attempts.forEach((a) => rows.push([
+      a.student_name, a.student_identifier || "-", STATUS_LABEL[a.status] || a.status,
+      a.score ?? "-", fmtDateTime(a.submitted_at),
+    ]));
+    const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
+    const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+    const a = document.createElement("a");
+    a.href = url; a.download = `hasil-${active.title}.csv`; a.click();
+  };
+
+  // ---- Detail (grade) view
+  if (grading) {
+    return (
+      <div data-testid="grade-page">
+        <button onClick={() => setGrading(null)} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
+          <ArrowLeft className="h-4 w-4" /> Kembali ke daftar hasil
+        </button>
+        <h1 className="font-heading text-2xl font-semibold mb-1">Koreksi: {grading.student_name}</h1>
+        <p className="text-muted-foreground mb-6">{grading.session_title}</p>
+
+        <div className="space-y-4">
+          {grading.details.map((d, i) => (
+            <div key={i} className="bg-card border border-border rounded-md p-5">
+              <div className="flex gap-2 mb-2">
+                <Badge variant="outline" className="text-xs">{QTYPE_LABEL[d.type]}</Badge>
+                <Badge variant="outline" className="text-xs">Bobot {d.points_possible}</Badge>
+                {d.type !== "essay" && (
+                  <Badge className={`text-xs border-0 ${d.is_correct ? "bg-primary/10 text-primary" : "bg-destructive/10 text-destructive"}`}>
+                    {d.is_correct ? "Benar" : "Salah"}
+                  </Badge>
+                )}
+              </div>
+              <p className="text-sm font-medium mb-2">{i + 1}. {d.text}</p>
+              {d.type === "pg" && (
+                <p className="text-sm text-muted-foreground">Jawaban siswa: {d.answer != null ? `${String.fromCharCode(65 + Number(d.answer))}. ${d.options?.[Number(d.answer)] ?? ""}` : "(kosong)"}</p>
+              )}
+              {d.type === "truefalse" && (
+                <p className="text-sm text-muted-foreground">Jawaban siswa: {d.answer === "true" ? "Benar" : d.answer === "false" ? "Salah" : "(kosong)"}</p>
+              )}
+              {d.type === "essay" && (
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground bg-muted/40 rounded-md p-3 whitespace-pre-wrap">{d.answer || "(kosong)"}</p>
+                  <div className="flex items-center gap-2">
+                    <Label className="text-xs">Nilai (maks {d.points_possible}):</Label>
+                    <Input type="number" min="0" max={d.points_possible} step="0.5" value={scores[d.question_id] ?? 0}
+                      onChange={(e) => setScores({ ...scores, [d.question_id]: e.target.value })}
+                      className="w-28 h-9" data-testid={`essay-score-${d.question_id}`} />
+                  </div>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+        <div className="mt-6 flex justify-end">
+          <Button onClick={submitGrade} data-testid="submit-grade-btn">Simpan Nilai</Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Session results table
+  if (active && data) {
+    const scored = data.attempts.filter((a) => a.score != null);
+    const avg = scored.length ? (scored.reduce((s, a) => s + a.score, 0) / scored.length).toFixed(1) : "-";
+    return (
+      <div data-testid="session-results">
+        <button onClick={() => { setActive(null); setData(null); }} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
+          <ArrowLeft className="h-4 w-4" /> Kembali ke daftar sesi
+        </button>
+        <div className="flex items-end justify-between mb-6 gap-4 flex-wrap">
+          <div>
+            <h1 className="font-heading text-2xl font-semibold">{active.title}</h1>
+            <p className="text-muted-foreground">{data.attempts.length} peserta · rata-rata {avg}</p>
+          </div>
+          <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+        </div>
+        <div className="bg-card border border-border rounded-md overflow-hidden">
+          <Table>
+            <TableHeader>
+              <TableRow>
+                <TableHead>Nama Siswa</TableHead>
+                <TableHead>NISN/NIP</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Nilai</TableHead>
+                <TableHead>Kumpul</TableHead>
+                <TableHead className="text-right">Aksi</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {data.attempts.map((a) => (
+                <TableRow key={a.id} data-testid={`result-row-${a.id}`}>
+                  <TableCell className="font-medium">{a.student_name}</TableCell>
+                  <TableCell className="text-muted-foreground">{a.student_identifier || "-"}</TableCell>
+                  <TableCell><Badge variant="outline">{STATUS_LABEL[a.status] || a.status}</Badge></TableCell>
+                  <TableCell className="font-semibold">{a.score != null ? a.score : "—"}</TableCell>
+                  <TableCell className="text-muted-foreground">{fmtDateTime(a.submitted_at)}</TableCell>
+                  <TableCell className="text-right">
+                    <Button size="sm" variant={a.status === "menunggu_koreksi" ? "default" : "outline"} onClick={() => openGrade(a)} data-testid={`grade-btn-${a.id}`}>
+                      {a.status === "menunggu_koreksi" ? "Koreksi" : "Lihat"}
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+              {data.attempts.length === 0 && (
+                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground py-10">Belum ada peserta.</TableCell></TableRow>
+              )}
+            </TableBody>
+          </Table>
+        </div>
+      </div>
+    );
+  }
+
+  // ---- Session list
+  return (
+    <div data-testid="results-page">
+      <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Penilaian</p>
+      <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1 mb-8">Hasil & Koreksi</h1>
+      {sessions.length === 0 ? (
+        <div className="border border-dashed border-border rounded-md p-16 text-center text-muted-foreground">
+          <ClipboardCheck className="h-10 w-10 mx-auto mb-3 opacity-40" />Belum ada sesi ujian.
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {sessions.map((s) => (
+            <button key={s.id} onClick={() => openSession(s)} data-testid={`open-results-${s.id}`}
+              className="w-full text-left bg-card border border-border rounded-md p-5 flex items-center justify-between hover:border-primary/40 hover:bg-primary/5 transition-colors">
+              <div>
+                <h3 className="font-heading text-lg font-medium">{s.title}</h3>
+                <p className="text-sm text-muted-foreground">{s.package_title} · {fmtDateTime(s.start_time)}</p>
+              </div>
+              <ChevronRight className="h-5 w-5 text-muted-foreground" />
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
