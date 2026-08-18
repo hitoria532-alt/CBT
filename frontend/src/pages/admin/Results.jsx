@@ -149,7 +149,7 @@ export default function Results() {
             <h1 className="font-heading text-2xl font-semibold">Analitik Butir Soal</h1>
             <p className="text-muted-foreground">{analytics.session_title} · {analytics.participants} peserta</p>
             {analytics.thresholds && (
-              <p className="text-xs text-muted-foreground mt-1">Ambang: Mudah ≥ {analytics.thresholds.easy_min}% · Sedang ≥ {analytics.thresholds.medium_min}% · Sulit &lt; {analytics.thresholds.medium_min}%</p>
+              <p className="text-xs text-muted-foreground mt-1">Ambang ({analytics.thresholds.source === "paket" ? "khusus paket" : "global"}): Mudah ≥ {analytics.thresholds.easy_min}% · Sedang ≥ {analytics.thresholds.medium_min}% · Sulit &lt; {analytics.thresholds.medium_min}%</p>
             )}
           </div>
           <Button variant="outline" onClick={openThreshold} data-testid="edit-threshold-btn"><SlidersHorizontal className="h-4 w-4 mr-2" />Atur Ambang</Button>

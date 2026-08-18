@@ -17,7 +17,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false, min_score: 0, rounding: "2desimal" };
+const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false, min_score: 0, rounding: "2desimal", easy_min: null, medium_min: null };
 
 export default function Packages() {
   const [items, setItems] = useState([]);
@@ -40,7 +40,8 @@ export default function Packages() {
     setForm({ title: p.title, description: p.description || "", category_id: p.category_id || "",
       question_ids: p.question_ids || [], scoring_method: p.scoring_method || "percentage",
       shuffle_questions: !!p.shuffle_questions, shuffle_options: !!p.shuffle_options,
-      min_score: p.min_score ?? 0, rounding: p.rounding || "2desimal" });
+      min_score: p.min_score ?? 0, rounding: p.rounding || "2desimal",
+      easy_min: p.easy_min ?? null, medium_min: p.medium_min ?? null });
     setOpen(true);
   };
 
@@ -51,7 +52,9 @@ export default function Packages() {
   const save = async () => {
     if (!form.title.trim()) return toast.error("Judul paket wajib diisi");
     if (form.question_ids.length === 0) return toast.error("Pilih minimal 1 soal");
-    const payload = { ...form, category_id: form.category_id || null, min_score: Number(form.min_score) || 0 };
+    const payload = { ...form, category_id: form.category_id || null, min_score: Number(form.min_score) || 0,
+      easy_min: form.easy_min === null || form.easy_min === "" ? null : Number(form.easy_min),
+      medium_min: form.medium_min === null || form.medium_min === "" ? null : Number(form.medium_min) };
     try {
       if (editing) await api.put(`/packages/${editing.id}`, payload);
       else await api.post("/packages", payload);
@@ -172,6 +175,32 @@ export default function Packages() {
                   </SelectContent>
                 </Select>
               </div>
+            </div>
+
+            <div className="rounded-md border border-border p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <div>
+                  <Label>Ambang Kesukaran Khusus</Label>
+                  <p className="text-xs text-muted-foreground">Timpa setelan global untuk paket ini</p>
+                </div>
+                <Switch
+                  checked={form.easy_min !== null}
+                  onCheckedChange={(v) => setForm({ ...form, easy_min: v ? 70 : null, medium_min: v ? 40 : null })}
+                  data-testid="custom-threshold-switch"
+                />
+              </div>
+              {form.easy_min !== null && (
+                <div className="grid grid-cols-2 gap-4">
+                  <div className="space-y-2">
+                    <Label className="text-xs">Mudah (≥ %)</Label>
+                    <Input type="number" min="1" max="100" value={form.easy_min} onChange={(e) => setForm({ ...form, easy_min: e.target.value })} data-testid="pkg-easy-min-input" />
+                  </div>
+                  <div className="space-y-2">
+                    <Label className="text-xs">Sedang (≥ %)</Label>
+                    <Input type="number" min="0" max="99" value={form.medium_min} onChange={(e) => setForm({ ...form, medium_min: e.target.value })} data-testid="pkg-medium-min-input" />
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="space-y-2">

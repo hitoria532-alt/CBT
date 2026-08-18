@@ -212,6 +212,8 @@ class Package(BaseModel):
     shuffle_options: bool = False
     min_score: float = 0.0
     rounding: str = "2desimal"  # 2desimal | 1desimal | bulat
+    easy_min: Optional[float] = None
+    medium_min: Optional[float] = None
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -225,6 +227,8 @@ class PackageBody(BaseModel):
     shuffle_options: bool = False
     min_score: float = 0.0
     rounding: str = "2desimal"
+    easy_min: Optional[float] = None
+    medium_min: Optional[float] = None
 
 
 class Session(BaseModel):
@@ -431,8 +435,17 @@ async def get_package(pid: str, user: dict = Depends(require_roles("admin", "gur
     return p
 
 
+def _check_pkg_thresholds(body: "PackageBody"):
+    if body.easy_min is not None or body.medium_min is not None:
+        if body.easy_min is None or body.medium_min is None:
+            raise HTTPException(status_code=400, detail="Ambang Mudah & Sedang harus diisi keduanya")
+        if not (0 <= body.medium_min < body.easy_min <= 100):
+            raise HTTPException(status_code=400, detail="Harus 0 ≤ Sedang < Mudah ≤ 100")
+
+
 @api_router.post("/packages")
 async def create_package(body: PackageBody, user: dict = Depends(require_roles("admin", "guru"))):
+    _check_pkg_thresholds(body)
     pkg = Package(**body.model_dump())
     await db.packages.insert_one(pkg.model_dump())
     return pkg.model_dump()
@@ -440,6 +453,7 @@ async def create_package(body: PackageBody, user: dict = Depends(require_roles("
 
 @api_router.put("/packages/{pid}")
 async def update_package(pid: str, body: PackageBody, user: dict = Depends(require_roles("admin", "guru"))):
+    _check_pkg_thresholds(body)
     await db.packages.update_one({"id": pid}, {"$set": body.model_dump()})
     return await db.packages.find_one({"id": pid}, {"_id": 0})
 
@@ -1092,8 +1106,14 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
     qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     settings = await db.settings.find_one({"key": "difficulty"}, {"_id": 0})
-    easy_min = settings.get("easy_min", 70) if settings else 70
-    medium_min = settings.get("medium_min", 40) if settings else 40
+    pkg_easy = pkg.get("easy_min")
+    pkg_med = pkg.get("medium_min")
+    if pkg_easy is not None and pkg_med is not None:
+        easy_min, medium_min, source = pkg_easy, pkg_med, "paket"
+    else:
+        easy_min = settings.get("easy_min", 70) if settings else 70
+        medium_min = settings.get("medium_min", 40) if settings else 40
+        source = "global"
     attempts = await db.attempts.find(
         {"session_id": session_id, "status": {"$in": ["selesai", "menunggu_koreksi"]}}, {"_id": 0}
     ).to_list(5000)
@@ -1131,7 +1151,7 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
             "percent_correct": pct, "difficulty": difficulty,
         })
     return {"session_title": session["title"], "participants": len(attempts),
-            "items": items, "thresholds": {"easy_min": easy_min, "medium_min": medium_min}}
+            "items": items, "thresholds": {"easy_min": easy_min, "medium_min": medium_min, "source": source}}
 
 
 # ------------------------------------------------------------------ CLASS GRADE EXPORT (Excel)
@@ -1339,6 +1359,31 @@ async def leaderboard_me(user: dict = Depends(require_roles("siswa"))):
         out.append({"class_id": c["id"], "class_name": c["name"],
                     "rows": await compute_class_leaderboard(c)})
     return out
+
+
+@api_router.get("/leaderboard/global")
+async def leaderboard_global(user: dict = Depends(get_current_user)):
+    students = await db.users.find({"role": "siswa"}).to_list(5000)
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    cls_by_student = {}
+    for c in classes:
+        for sid in c.get("student_ids", []):
+            cls_by_student.setdefault(sid, []).append(c["name"])
+    rows = []
+    for u in students:
+        uid = str(u["_id"])
+        atts = await db.attempts.find({"student_id": uid, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
+        scores = [a["score"] for a in atts if a.get("score") is not None]
+        rows.append({
+            "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
+            "classes": cls_by_student.get(uid, []),
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "completed": len(scores),
+        })
+    rows.sort(key=lambda r: (-r["avg_score"], r["name"].lower()))
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return {"rows": rows}
 
 
 # ------------------------------------------------------------------ startup

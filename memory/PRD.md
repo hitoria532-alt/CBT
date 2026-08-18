@@ -58,6 +58,11 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Ambang Kesukaran**: guru bisa atur batas persen label Mudah/Sedang/Sulit (global) via dialog "Atur Ambang" di Analitik Butir. Endpoint `/api/settings/difficulty` (GET/PUT, validasi medium<easy, clamp 0-100); analitik memakai ambang tersimpan.
 - Verified: 11/11 pytest iter-5 lolos + frontend E2E 100%, tanpa isu kritis.
 
+## Implemented (2026-08-18) — Iteration 6
+- **Peringkat Angkatan**: papan peringkat gabungan lintas kelas (semua siswa) via `/api/leaderboard/global`. Admin: opsi "🏆 Angkatan (Semua Siswa)" default di halaman Peringkat (menampilkan kelas tiap siswa). Siswa: seksi "Peringkat Angkatan" (top 10 + baris sendiri) di atas peringkat kelas.
+- **Ambang per Paket**: paket bisa punya ambang kesukaran khusus (easy_min/medium_min) yang menimpa setelan global; analitik menampilkan sumber ("khusus paket"/"global"). Validasi 0 ≤ Sedang < Mudah ≤ 100 di backend.
+- Verified: 10/10 pytest iter-6 lolos + frontend E2E 100%, tanpa isu kritis.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
