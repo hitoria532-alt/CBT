@@ -1,6 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useEffect, useState, useRef } from "react";
-import { GraduationCap, Home, ClipboardList, LogOut, Bell, Radio, Clock, Megaphone } from "lucide-react";
+import { GraduationCap, Home, ClipboardList, LogOut, Bell, Radio, Clock, Megaphone, Trophy } from "lucide-react";
 import { useAuth } from "../context/AuthContext";
 import api from "../lib/api";
 import { fmtDateTime } from "../lib/utils2";
@@ -60,6 +60,9 @@ export default function StudentLayout() {
             </NavLink>
             <NavLink to="/hasil" end className={link} data-testid="nav-hasil-saya">
               <ClipboardList className="h-4 w-4" /> <span className="hidden sm:inline">Hasil Saya</span>
+            </NavLink>
+            <NavLink to="/peringkat" className={link} data-testid="nav-peringkat">
+              <Trophy className="h-4 w-4" /> <span className="hidden sm:inline">Peringkat</span>
             </NavLink>
           </nav>
           <div className="flex items-center gap-2 sm:gap-3">

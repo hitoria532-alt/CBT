@@ -14,9 +14,11 @@ import Sessions from "./pages/admin/Sessions";
 import Classes from "./pages/admin/Classes";
 import Results from "./pages/admin/Results";
 import Accounts from "./pages/admin/Accounts";
+import Leaderboard from "./pages/admin/Leaderboard";
 import StudentHome from "./pages/student/StudentHome";
 import ExamView from "./pages/student/ExamView";
 import StudentResults from "./pages/student/StudentResults";
+import StudentLeaderboard from "./pages/student/StudentLeaderboard";
 import ResultDetail from "./pages/student/ResultDetail";
 
 function Loader() {
@@ -69,6 +71,7 @@ function App() {
               <Route path="sesi" element={<Sessions />} />
               <Route path="kelas" element={<Classes />} />
               <Route path="hasil" element={<Results />} />
+              <Route path="peringkat" element={<Leaderboard />} />
               <Route path="akun" element={<Accounts />} />
             </Route>
 
@@ -82,6 +85,7 @@ function App() {
             >
               <Route path="/beranda" element={<StudentHome />} />
               <Route path="/hasil" element={<StudentResults />} />
+              <Route path="/peringkat" element={<StudentLeaderboard />} />
               <Route path="/hasil/:attemptId" element={<ResultDetail />} />
             </Route>
 

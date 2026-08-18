@@ -265,6 +265,11 @@ class ClassBody(BaseModel):
     student_ids: List[str] = []
 
 
+class DifficultyBody(BaseModel):
+    easy_min: float = 70.0
+    medium_min: float = 40.0
+
+
 class StartAttemptBody(BaseModel):
     session_id: str
 
@@ -1086,6 +1091,9 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
     qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
+    settings = await db.settings.find_one({"key": "difficulty"}, {"_id": 0})
+    easy_min = settings.get("easy_min", 70) if settings else 70
+    medium_min = settings.get("medium_min", 40) if settings else 40
     attempts = await db.attempts.find(
         {"session_id": session_id, "status": {"$in": ["selesai", "menunggu_koreksi"]}}, {"_id": 0}
     ).to_list(5000)
@@ -1114,14 +1122,16 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
             p = (correct_count / total) if total else 0
         else:
             p = (pts_earned / pts_possible) if pts_possible else 0
-        difficulty = "Mudah" if p >= 0.7 else ("Sedang" if p >= 0.4 else "Sulit")
+        pct = round(p * 100, 1)
+        difficulty = "Mudah" if pct >= easy_min else ("Sedang" if pct >= medium_min else "Sulit")
         items.append({
             "question_id": qid, "text": q["text"], "type": q["type"],
             "total": total, "answered": answered,
             "correct": correct_count if q["type"] in ("pg", "truefalse") else None,
-            "percent_correct": round(p * 100, 1), "difficulty": difficulty,
+            "percent_correct": pct, "difficulty": difficulty,
         })
-    return {"session_title": session["title"], "participants": len(attempts), "items": items}
+    return {"session_title": session["title"], "participants": len(attempts),
+            "items": items, "thresholds": {"easy_min": easy_min, "medium_min": medium_min}}
 
 
 # ------------------------------------------------------------------ CLASS GRADE EXPORT (Excel)
@@ -1267,6 +1277,68 @@ async def notifications(user: dict = Depends(require_roles("siswa"))):
                               "message": "Ujian sedang berlangsung — segera kerjakan.", "time": s["start_time"]})
     notes.sort(key=lambda n: n["time"], reverse=True)
     return notes
+
+
+# ------------------------------------------------------------------ DIFFICULTY SETTINGS
+@api_router.get("/settings/difficulty")
+async def get_difficulty(user: dict = Depends(require_roles("admin", "guru"))):
+    doc = await db.settings.find_one({"key": "difficulty"}, {"_id": 0})
+    if not doc:
+        return {"easy_min": 70, "medium_min": 40}
+    return {"easy_min": doc.get("easy_min", 70), "medium_min": doc.get("medium_min", 40)}
+
+
+@api_router.put("/settings/difficulty")
+async def set_difficulty(body: DifficultyBody, user: dict = Depends(require_roles("admin", "guru"))):
+    easy = max(1.0, min(100.0, float(body.easy_min)))
+    medium = max(0.0, min(99.0, float(body.medium_min)))
+    if medium >= easy:
+        raise HTTPException(status_code=400, detail="Ambang 'Sedang' harus lebih kecil dari 'Mudah'")
+    await db.settings.update_one(
+        {"key": "difficulty"},
+        {"$set": {"key": "difficulty", "easy_min": easy, "medium_min": medium}},
+        upsert=True)
+    return {"easy_min": easy, "medium_min": medium}
+
+
+# ------------------------------------------------------------------ LEADERBOARD
+async def compute_class_leaderboard(cls: dict) -> list:
+    sids = cls.get("student_ids", [])
+    if not sids:
+        return []
+    docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in sids]}}).to_list(2000)
+    rows = []
+    for u in docs:
+        uid = str(u["_id"])
+        atts = await db.attempts.find({"student_id": uid, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
+        scores = [a["score"] for a in atts if a.get("score") is not None]
+        rows.append({
+            "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "completed": len(scores),
+        })
+    rows.sort(key=lambda r: (-r["avg_score"], r["name"].lower()))
+    for i, r in enumerate(rows):
+        r["rank"] = i + 1
+    return rows
+
+
+@api_router.get("/leaderboard/class/{class_id}")
+async def leaderboard_class(class_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    return {"class_name": cls["name"], "rows": await compute_class_leaderboard(cls)}
+
+
+@api_router.get("/leaderboard/me")
+async def leaderboard_me(user: dict = Depends(require_roles("siswa"))):
+    classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0}).to_list(1000)
+    out = []
+    for c in classes:
+        out.append({"class_id": c["id"], "class_name": c["name"],
+                    "rows": await compute_class_leaderboard(c)})
+    return out
 
 
 # ------------------------------------------------------------------ startup

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3 } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -20,6 +20,8 @@ export default function Results() {
   const [grading, setGrading] = useState(null); // attempt detail being graded
   const [scores, setScores] = useState({});
   const [analytics, setAnalytics] = useState(null);
+  const [thresholdOpen, setThresholdOpen] = useState(false);
+  const [thForm, setThForm] = useState({ easy_min: 70, medium_min: 40 });
 
   useEffect(() => { api.get("/sessions").then((r) => setSessions(r.data)); }, []);
 
@@ -67,6 +69,21 @@ export default function Results() {
   const openAnalytics = async () => {
     const r = await api.get(`/analytics/session/${active.id}`);
     setAnalytics(r.data);
+  };
+
+  const openThreshold = () => {
+    setThForm(analytics?.thresholds || { easy_min: 70, medium_min: 40 });
+    setThresholdOpen(true);
+  };
+
+  const saveThreshold = async () => {
+    try {
+      await api.put("/settings/difficulty", { easy_min: Number(thForm.easy_min), medium_min: Number(thForm.medium_min) });
+      toast.success("Ambang kesukaran disimpan");
+      setThresholdOpen(false);
+      const r = await api.get(`/analytics/session/${active.id}`);
+      setAnalytics(r.data);
+    } catch (e) { toast.error(apiError(e)); }
   };
 
   // ---- Detail (grade) view
@@ -127,8 +144,16 @@ export default function Results() {
         <button onClick={() => setAnalytics(null)} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
           <ArrowLeft className="h-4 w-4" /> Kembali ke hasil
         </button>
-        <h1 className="font-heading text-2xl font-semibold">Analitik Butir Soal</h1>
-        <p className="text-muted-foreground mb-6">{analytics.session_title} · {analytics.participants} peserta</p>
+        <div className="flex items-end justify-between gap-4 flex-wrap mb-6">
+          <div>
+            <h1 className="font-heading text-2xl font-semibold">Analitik Butir Soal</h1>
+            <p className="text-muted-foreground">{analytics.session_title} · {analytics.participants} peserta</p>
+            {analytics.thresholds && (
+              <p className="text-xs text-muted-foreground mt-1">Ambang: Mudah ≥ {analytics.thresholds.easy_min}% · Sedang ≥ {analytics.thresholds.medium_min}% · Sulit &lt; {analytics.thresholds.medium_min}%</p>
+            )}
+          </div>
+          <Button variant="outline" onClick={openThreshold} data-testid="edit-threshold-btn"><SlidersHorizontal className="h-4 w-4 mr-2" />Atur Ambang</Button>
+        </div>
         {analytics.participants === 0 ? (
           <div className="border border-dashed border-border rounded-md p-12 text-center text-muted-foreground">Belum ada peserta yang mengumpulkan.</div>
         ) : (
@@ -154,6 +179,27 @@ export default function Results() {
             ))}
           </div>
         )}
+        <Dialog open={thresholdOpen} onOpenChange={setThresholdOpen}>
+          <DialogContent>
+            <DialogHeader><DialogTitle>Atur Ambang Kesukaran</DialogTitle></DialogHeader>
+            <div className="space-y-4 py-2">
+              <p className="text-sm text-muted-foreground">Batas persen jawaban benar untuk menentukan label kesukaran soal. Berlaku untuk semua analitik.</p>
+              <div className="space-y-2">
+                <Label>Ambang "Mudah" (≥ %)</Label>
+                <Input type="number" min="1" max="100" value={thForm.easy_min} onChange={(e) => setThForm({ ...thForm, easy_min: e.target.value })} data-testid="easy-min-input" />
+              </div>
+              <div className="space-y-2">
+                <Label>Ambang "Sedang" (≥ %)</Label>
+                <Input type="number" min="0" max="99" value={thForm.medium_min} onChange={(e) => setThForm({ ...thForm, medium_min: e.target.value })} data-testid="medium-min-input" />
+                <p className="text-xs text-muted-foreground">Di bawah nilai ini akan dilabeli "Sulit". Harus lebih kecil dari ambang "Mudah".</p>
+              </div>
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={() => setThresholdOpen(false)}>Batal</Button>
+              <Button onClick={saveThreshold} data-testid="save-threshold-btn">Simpan</Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     );
   }

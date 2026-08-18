@@ -53,6 +53,11 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Bank Rumus Nilai**: paket punya Nilai Minimal (floor) & Pembulatan (2/1 desimal/bulat), diterapkan di compute_grade (re-round setelah clamp). Terverifikasi 1/3 benar + min 40/bulat = 40.0.
 - Verified: 12/12 pytest iter-4 lolos + frontend E2E 100% (fix import Textarea di Sessions.jsx oleh testing agent).
 
+## Implemented (2026-08-18) — Iteration 5
+- **Peringkat Kelas**: papan peringkat siswa per kelas berdasarkan rata-rata nilai. Admin `/admin/peringkat` (pilih kelas, medali top-3); siswa `/peringkat` (peringkat kelasnya, baris sendiri ditandai "Anda"). Endpoint `/api/leaderboard/class/{id}` & `/api/leaderboard/me`.
+- **Ambang Kesukaran**: guru bisa atur batas persen label Mudah/Sedang/Sulit (global) via dialog "Atur Ambang" di Analitik Butir. Endpoint `/api/settings/difficulty` (GET/PUT, validasi medium<easy, clamp 0-100); analitik memakai ambang tersimpan.
+- Verified: 11/11 pytest iter-5 lolos + frontend E2E 100%, tanpa isu kritis.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
