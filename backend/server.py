@@ -491,6 +491,28 @@ async def delete_package(pid: str, user: dict = Depends(require_roles("admin", "
     return {"ok": True}
 
 
+@api_router.post("/packages/{pid}/duplicate")
+async def duplicate_package(pid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    src = await db.packages.find_one({"id": pid}, {"_id": 0})
+    if not src:
+        raise HTTPException(status_code=404, detail="Paket tidak ditemukan")
+    if (user["role"] != "admin" and src.get("created_by")
+            and src["created_by"] != user["id"] and not src.get("is_public")):
+        raise HTTPException(status_code=403, detail="Paket ini tidak dapat disalin")
+    new = Package(
+        title=f"{src.get('title', 'Paket')} (Salinan)", description=src.get("description", ""),
+        category_id=src.get("category_id"), question_ids=src.get("question_ids", []),
+        scoring_method=src.get("scoring_method", "percentage"),
+        shuffle_questions=src.get("shuffle_questions", False),
+        shuffle_options=src.get("shuffle_options", False),
+        min_score=src.get("min_score", 0), rounding=src.get("rounding", "2desimal"),
+        easy_min=src.get("easy_min"), medium_min=src.get("medium_min"),
+        created_by=user["id"], is_public=False,
+    )
+    await db.packages.insert_one(new.model_dump())
+    return new.model_dump()
+
+
 # ------------------------------------------------------------------ SESSIONS
 async def enrich_session(s: dict) -> dict:
     pkg = await db.packages.find_one({"id": s["package_id"]}, {"_id": 0})

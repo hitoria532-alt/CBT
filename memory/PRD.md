@@ -82,6 +82,10 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Rapor Kelas Massal**: `/api/report/class/{id}/pdf` (admin/guru) — satu file PDF berisi rapor semua siswa satu kelas (tiap siswa 1 halaman: identitas, rata-rata, grafik perkembangan, tabel rincian). Tombol "Rapor" pada tiap kartu kelas di Manajemen Kelas.
 - Verified: endpoint 200 application/pdf (%PDF valid), siswa ditolak 403; Classes.jsx parse OK.
 
+## Implemented (2026-08-18) — Iteration 11
+- **Duplikat Paket**: `POST /api/packages/{id}/duplicate` — guru menyalin paket (publik milik guru lain, atau miliknya) menjadi paket baru miliknya ("… (Salinan)", is_public=false) untuk diubah bebas. Menyalin paket privat milik guru lain → 403. Tombol "Duplikat" (ikon copy) di tiap kartu paket.
+- Verified: guru B menyalin paket publik guru A (jadi milik B & privat), salinan muncul di daftar B; salin paket privat orang lain 403; Packages.jsx parse OK.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus

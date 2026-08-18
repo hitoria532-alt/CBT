@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, Package as PackageIcon } from "lucide-react";
+import { Plus, Pencil, Trash2, Package as PackageIcon, Copy } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
@@ -67,6 +67,14 @@ export default function Packages() {
     await api.delete(`/packages/${p.id}`); toast.success("Paket dihapus"); load();
   };
 
+  const duplicate = async (p) => {
+    try {
+      await api.post(`/packages/${p.id}/duplicate`);
+      toast.success("Paket disalin ke milik Anda");
+      load();
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   const filteredQ = form.category_id ? questions.filter((q) => q.category_id === form.category_id) : questions;
 
   return (
@@ -89,7 +97,8 @@ export default function Packages() {
             <div key={p.id} className="bg-card border border-border rounded-md p-6 hover:shadow-sm transition-shadow" data-testid={`package-${p.id}`}>
               <div className="flex items-start justify-between">
                 <h3 className="font-heading text-lg font-medium pr-2">{p.title}</h3>
-                <div className="flex gap-1 shrink-0">
+                <div className="flex gap-1 shrink-0 items-center">
+                  <button onClick={() => duplicate(p)} data-testid={`duplicate-package-${p.id}`} title="Duplikat paket" className="text-muted-foreground hover:text-primary p-1"><Copy className="h-4 w-4" /></button>
                   {p.is_owner ? (
                     <>
                       <button onClick={() => openEdit(p)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
