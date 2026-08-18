@@ -5,6 +5,7 @@ import api, { apiError } from "../../lib/api";
 import { fmtDateTime, toLocalInput, fromLocalInput, STATUS_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
+import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
 import { Checkbox } from "../../components/ui/checkbox";
@@ -15,7 +16,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75, class_ids: [] };
+const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75, class_ids: [], announcement: "" };
 
 const statusColor = {
   akan_datang: "bg-secondary/20 text-secondary-foreground",
@@ -43,7 +44,7 @@ export default function Sessions() {
     setEditing(s);
     setForm({ title: s.title, package_id: s.package_id,
       start_time: toLocalInput(s.start_time), end_time: toLocalInput(s.end_time),
-      duration_minutes: s.duration_minutes, kkm: s.kkm, class_ids: s.class_ids || [] });
+      duration_minutes: s.duration_minutes, kkm: s.kkm, class_ids: s.class_ids || [], announcement: s.announcement || "" });
     setOpen(true);
   };
 
@@ -57,7 +58,7 @@ export default function Sessions() {
     const payload = {
       title: form.title, package_id: form.package_id,
       start_time: fromLocalInput(form.start_time), end_time: fromLocalInput(form.end_time),
-      duration_minutes: Number(form.duration_minutes), kkm: Number(form.kkm), class_ids: form.class_ids,
+      duration_minutes: Number(form.duration_minutes), kkm: Number(form.kkm), class_ids: form.class_ids, announcement: form.announcement,
     };
     try {
       if (editing) await api.put(`/sessions/${editing.id}`, payload);
@@ -161,6 +162,10 @@ export default function Sessions() {
                   ))}
                 </div>
               )}
+            </div>
+            <div className="space-y-2">
+              <Label>Pengumuman (opsional)</Label>
+              <Textarea value={form.announcement} onChange={(e) => setForm({ ...form, announcement: e.target.value })} rows={2} placeholder="Pesan yang tampil sebagai notifikasi untuk siswa" data-testid="session-announcement-input" />
             </div>
           </div>
           <DialogFooter>

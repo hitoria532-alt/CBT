@@ -278,12 +278,13 @@ export default function Questions() {
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground leading-relaxed">
               Unggah file <b>CSV</b> atau <b>Excel (.xlsx)</b> dengan kolom:
-              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, correct, weight, category</code>
+              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, correct, weight, category, image_url</code>
             </p>
             <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
               <li><b>type</b>: pg / truefalse / essay</li>
               <li><b>correct</b>: untuk PG isi A/B/C/D · untuk B/S isi benar/salah</li>
               <li><b>category</b>: nama kategori (dibuat otomatis bila belum ada)</li>
+              <li><b>image_url</b>: (opsional) tautan gambar soal, diunduh otomatis</li>
             </ul>
             <Button variant="outline" onClick={downloadTemplate} className="w-full" data-testid="download-template-btn">
               <Download className="h-4 w-4 mr-2" />Unduh Template CSV

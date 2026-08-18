@@ -17,7 +17,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false };
+const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false, min_score: 0, rounding: "2desimal" };
 
 export default function Packages() {
   const [items, setItems] = useState([]);
@@ -39,7 +39,8 @@ export default function Packages() {
     setEditing(p);
     setForm({ title: p.title, description: p.description || "", category_id: p.category_id || "",
       question_ids: p.question_ids || [], scoring_method: p.scoring_method || "percentage",
-      shuffle_questions: !!p.shuffle_questions, shuffle_options: !!p.shuffle_options });
+      shuffle_questions: !!p.shuffle_questions, shuffle_options: !!p.shuffle_options,
+      min_score: p.min_score ?? 0, rounding: p.rounding || "2desimal" });
     setOpen(true);
   };
 
@@ -50,7 +51,7 @@ export default function Packages() {
   const save = async () => {
     if (!form.title.trim()) return toast.error("Judul paket wajib diisi");
     if (form.question_ids.length === 0) return toast.error("Pilih minimal 1 soal");
-    const payload = { ...form, category_id: form.category_id || null };
+    const payload = { ...form, category_id: form.category_id || null, min_score: Number(form.min_score) || 0 };
     try {
       if (editing) await api.put(`/packages/${editing.id}`, payload);
       else await api.post("/packages", payload);
@@ -151,6 +152,25 @@ export default function Packages() {
                   <p className="text-xs text-muted-foreground">Untuk soal pilihan ganda</p>
                 </div>
                 <Switch checked={form.shuffle_options} onCheckedChange={(v) => setForm({ ...form, shuffle_options: v })} data-testid="shuffle-options-switch" />
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Nilai Minimal</Label>
+                <Input type="number" min="0" max="100" value={form.min_score} onChange={(e) => setForm({ ...form, min_score: e.target.value })} data-testid="min-score-input" />
+                <p className="text-xs text-muted-foreground">Nilai terendah yang diberikan.</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Pembulatan Nilai</Label>
+                <Select value={form.rounding} onValueChange={(v) => setForm({ ...form, rounding: v })}>
+                  <SelectTrigger data-testid="rounding-select"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="2desimal">2 desimal (85.75)</SelectItem>
+                    <SelectItem value="1desimal">1 desimal (85.8)</SelectItem>
+                    <SelectItem value="bulat">Bilangan bulat (86)</SelectItem>
+                  </SelectContent>
+                </Select>
               </div>
             </div>
 

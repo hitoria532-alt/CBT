@@ -6,6 +6,7 @@ import {
 } from "lucide-react";
 import {
   BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid,
+  LineChart, Line,
 } from "recharts";
 import api from "../../lib/api";
 
@@ -27,9 +28,11 @@ function Stat({ icon: Icon, label, value, accent }) {
 
 export default function Dashboard() {
   const [s, setS] = useState(null);
+  const [ca, setCa] = useState(null);
 
   useEffect(() => {
     api.get("/dashboard/stats").then((r) => setS(r.data)).catch(() => {});
+    api.get("/analytics/classes").then((r) => setCa(r.data)).catch(() => {});
   }, []);
 
   if (!s) return <div className="text-muted-foreground">Memuat...</div>;
@@ -82,6 +85,48 @@ export default function Dashboard() {
               <Bar dataKey="jumlah" fill="hsl(var(--primary))" radius={[4, 4, 0, 0]} maxBarSize={64} />
             </BarChart>
           </ResponsiveContainer>
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2 mt-6">
+        <div className="bg-card border border-border rounded-md p-6" data-testid="class-avg-chart">
+          <h3 className="font-heading text-xl font-medium mb-1">Rata-rata Nilai per Kelas</h3>
+          <p className="text-sm text-muted-foreground mb-6">Perbandingan capaian antar kelas</p>
+          <div className="h-64">
+            {ca && ca.classes.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={ca.classes} layout="vertical" margin={{ left: 8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" horizontal={false} />
+                  <XAxis type="number" domain={[0, 100]} stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                  <YAxis type="category" dataKey="name" stroke="hsl(var(--muted-foreground))" fontSize={12} width={90} />
+                  <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "0.5rem", fontSize: "0.85rem" }} />
+                  <Bar dataKey="avg_score" name="Rata-rata" fill="hsl(var(--accent))" radius={[0, 4, 4, 0]} maxBarSize={40} />
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Belum ada data kelas.</div>
+            )}
+          </div>
+        </div>
+
+        <div className="bg-card border border-border rounded-md p-6" data-testid="score-trend-chart">
+          <h3 className="font-heading text-xl font-medium mb-1">Tren Rata-rata Nilai</h3>
+          <p className="text-sm text-muted-foreground mb-6">Rata-rata nilai tiap sesi ujian</p>
+          <div className="h-64">
+            {ca && ca.trend.length > 0 ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={ca.trend} margin={{ left: -8 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                  <XAxis dataKey="session" stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                  <YAxis domain={[0, 100]} stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                  <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "0.5rem", fontSize: "0.85rem" }} />
+                  <Line type="monotone" dataKey="avg" name="Rata-rata" stroke="hsl(var(--primary))" strokeWidth={2.5} dot={{ r: 4, fill: "hsl(var(--primary))" }} />
+                </LineChart>
+              </ResponsiveContainer>
+            ) : (
+              <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Belum ada nilai ujian.</div>
+            )}
+          </div>
         </div>
       </div>
     </motion.div>

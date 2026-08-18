@@ -210,6 +210,8 @@ class Package(BaseModel):
     scoring_method: str = "percentage"  # percentage | weighted
     shuffle_questions: bool = False
     shuffle_options: bool = False
+    min_score: float = 0.0
+    rounding: str = "2desimal"  # 2desimal | 1desimal | bulat
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -221,6 +223,8 @@ class PackageBody(BaseModel):
     scoring_method: str = "percentage"
     shuffle_questions: bool = False
     shuffle_options: bool = False
+    min_score: float = 0.0
+    rounding: str = "2desimal"
 
 
 class Session(BaseModel):
@@ -232,6 +236,7 @@ class Session(BaseModel):
     duration_minutes: int = 60
     kkm: float = 75.0
     class_ids: List[str] = []
+    announcement: Optional[str] = ""
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -243,6 +248,7 @@ class SessionBody(BaseModel):
     duration_minutes: int = 60
     kkm: float = 75.0
     class_ids: List[str] = []
+    announcement: Optional[str] = ""
 
 
 class SchoolClass(BaseModel):
@@ -595,7 +601,27 @@ def compute_grade(pkg: dict, questions: dict, answers: dict, essay_scores: dict 
                 needs_grading = True
         earned += d["points_earned"]
         details.append(d)
-    score = None if needs_grading else (round(earned / total_possible * 100, 2) if total_possible else 0.0)
+    if needs_grading:
+        score = None
+    elif not total_possible:
+        score = 0.0
+    else:
+        raw = earned / total_possible * 100
+        rounding = pkg.get("rounding", "2desimal")
+        if rounding == "bulat":
+            raw = round(raw)
+        elif rounding == "1desimal":
+            raw = round(raw, 1)
+        else:
+            raw = round(raw, 2)
+        min_score = float(pkg.get("min_score", 0) or 0)
+        score = max(raw, min_score)
+        if rounding == "bulat":
+            score = round(score)
+        elif rounding == "1desimal":
+            score = round(score, 1)
+        else:
+            score = round(score, 2)
     return details, needs_grading, score, round(earned, 2), round(total_possible, 2)
 
 
@@ -741,10 +767,11 @@ async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "gu
 
 # ------------------------------------------------------------------ QUESTION IMPORT
 IMPORT_TEMPLATE = (
-    "type,text,option_a,option_b,option_c,option_d,correct,weight,category\n"
-    "pg,Berapa hasil 5 + 3?,6,7,8,9,C,1,Matematika\n"
-    "truefalse,Matahari terbit dari timur.,,,,,benar,1,IPA\n"
-    "essay,Jelaskan proses fotosintesis.,,,,,,2,IPA\n"
+    "type,text,option_a,option_b,option_c,option_d,correct,weight,category,image_url\n"
+    "pg,Berapa hasil 5 + 3?,6,7,8,9,C,1,Matematika,\n"
+    "truefalse,Matahari terbit dari timur.,,,,,benar,1,IPA,\n"
+    "essay,Jelaskan proses fotosintesis.,,,,,,2,IPA,\n"
+    "pg,Perhatikan gambar berikut.,A,B,C,D,A,1,IPA,https://contoh.com/gambar.png\n"
 )
 
 
@@ -822,8 +849,14 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
                 raw_c = str(row.get("correct", "")).strip().lower()
                 correct = "true" if raw_c in ("true", "benar", "b", "1") else "false"
 
+            image_path = None
+            img_url = str(row.get("image_url", "") or "").strip()
+            if img_url and img_url.lower() != "nan" and img_url.startswith("http"):
+                image_path = await fetch_image_to_storage(img_url, user["id"])
+
             ques = Question(category_id=cat_id, type=qtype, text=text,
-                            options=options, correct_answer=correct, weight=weight)
+                            options=options, correct_answer=correct, weight=weight,
+                            image_path=image_path)
             await db.questions.insert_one(ques.model_dump())
             imported += 1
         except Exception as e:
@@ -934,6 +967,34 @@ async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
 # ------------------------------------------------------------------ IMAGE UPLOAD
 ALLOWED_IMG = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                "webp": "image/webp", "gif": "image/gif"}
+
+
+async def fetch_image_to_storage(url: str, user_id: str) -> Optional[str]:
+    """Download an image from a URL and store it. Returns storage path or None."""
+    try:
+        resp = requests.get(url, timeout=20, stream=True,
+                            headers={"User-Agent": "Mozilla/5.0 (compatible; CBT-Ujian/1.0)"})
+        resp.raise_for_status()
+        data = resp.content
+        if len(data) > 5 * 1024 * 1024:
+            return None
+        ct = resp.headers.get("Content-Type", "").split(";")[0].strip().lower()
+        ext = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}.get(ct)
+        if not ext:
+            ext = url.rsplit(".", 1)[-1].lower().split("?")[0]
+            if ext not in ALLOWED_IMG:
+                return None
+            ct = ALLOWED_IMG[ext]
+        path = f"{APP_NAME}/questions/{user_id}/{new_id()}.{ext}"
+        result = put_object(path, data, ct)
+        await db.files.insert_one({
+            "id": new_id(), "storage_path": result["path"], "original_filename": url,
+            "content_type": ct, "size": result.get("size"), "is_deleted": False,
+            "created_at": now_iso(),
+        })
+        return result["path"]
+    except Exception:
+        return None
 
 
 @api_router.post("/uploads/image")
@@ -1146,6 +1207,66 @@ async def dashboard_stats(user: dict = Depends(require_roles("admin", "guru"))):
     return {"students": students, "teachers": teachers, "questions": questions,
             "packages": packages, "sessions": sessions, "avg_score": avg,
             "completed_attempts": len(scores), "pending_grading": pending}
+
+
+# ------------------------------------------------------------------ CLASS ANALYTICS
+@api_router.get("/analytics/classes")
+async def analytics_classes(user: dict = Depends(require_roles("admin", "guru"))):
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    result = []
+    for c in classes:
+        sids = c.get("student_ids", [])
+        avg = 0
+        completed = 0
+        if sids:
+            attempts = await db.attempts.find(
+                {"student_id": {"$in": sids}, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
+            scores = [a["score"] for a in attempts if a.get("score") is not None]
+            avg = round(sum(scores) / len(scores), 1) if scores else 0
+            completed = len(scores)
+        result.append({"class_id": c["id"], "name": c["name"], "avg_score": avg,
+                       "completed": completed, "students": len(sids)})
+    sessions = await db.sessions.find({}, {"_id": 0}).sort("start_time", 1).to_list(1000)
+    trend = []
+    for s in sessions:
+        atts = await db.attempts.find({"session_id": s["id"], "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
+        sc = [a["score"] for a in atts if a.get("score") is not None]
+        if sc:
+            trend.append({"session": s["title"][:18], "avg": round(sum(sc) / len(sc), 1)})
+    return {"classes": result, "trend": trend}
+
+
+# ------------------------------------------------------------------ NOTIFICATIONS
+@api_router.get("/notifications")
+async def notifications(user: dict = Depends(require_roles("siswa"))):
+    my_classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)
+    my_class_ids = {c["id"] for c in my_classes}
+    sessions = await db.sessions.find({}, {"_id": 0}).to_list(1000)
+    now = datetime.now(timezone.utc)
+    notes = []
+    for s in sessions:
+        targets = s.get("class_ids") or []
+        if targets and not (set(targets) & my_class_ids):
+            continue
+        try:
+            start = datetime.fromisoformat(s["start_time"])
+            end = datetime.fromisoformat(s["end_time"])
+        except Exception:
+            continue
+        att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]}, {"_id": 0, "status": 1})
+        done = att and att["status"] != "berlangsung"
+        if s.get("announcement"):
+            notes.append({"id": f"{s['id']}-ann", "type": "info", "title": s["title"],
+                          "message": s["announcement"], "time": s["start_time"]})
+        if not done:
+            if now < start:
+                notes.append({"id": f"{s['id']}-open", "type": "upcoming", "title": s["title"],
+                              "message": "Ujian akan segera dibuka.", "time": s["start_time"]})
+            elif now <= end:
+                notes.append({"id": f"{s['id']}-live", "type": "live", "title": s["title"],
+                              "message": "Ujian sedang berlangsung — segera kerjakan.", "time": s["start_time"]})
+    notes.sort(key=lambda n: n["time"], reverse=True)
+    return notes
 
 
 # ------------------------------------------------------------------ startup
