@@ -214,6 +214,8 @@ class Package(BaseModel):
     rounding: str = "2desimal"  # 2desimal | 1desimal | bulat
     easy_min: Optional[float] = None
     medium_min: Optional[float] = None
+    created_by: Optional[str] = None
+    is_public: bool = False
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -229,6 +231,7 @@ class PackageBody(BaseModel):
     rounding: str = "2desimal"
     easy_min: Optional[float] = None
     medium_min: Optional[float] = None
+    is_public: bool = False
 
 
 class Session(BaseModel):
@@ -421,9 +424,21 @@ async def delete_question(qid: str, user: dict = Depends(require_roles("admin", 
 # ------------------------------------------------------------------ PACKAGES
 @api_router.get("/packages")
 async def list_packages(user: dict = Depends(require_roles("admin", "guru"))):
-    pkgs = await db.packages.find({}, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    if user["role"] == "admin":
+        q = {}
+    else:
+        q = {"$or": [{"created_by": user["id"]}, {"is_public": True},
+                     {"created_by": None}, {"created_by": {"$exists": False}}]}
+    pkgs = await db.packages.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    owner_ids = {p.get("created_by") for p in pkgs if p.get("created_by")}
+    owners = {}
+    if owner_ids:
+        docs = await db.users.find({"_id": {"$in": [ObjectId(o) for o in owner_ids]}}).to_list(2000)
+        owners = {str(d["_id"]): d["name"] for d in docs}
     for p in pkgs:
         p["question_count"] = len(p.get("question_ids", []))
+        p["owner_name"] = owners.get(p.get("created_by"), "—")
+        p["is_owner"] = user["role"] == "admin" or not p.get("created_by") or p.get("created_by") == user["id"]
     return pkgs
 
 
@@ -446,7 +461,9 @@ def _check_pkg_thresholds(body: "PackageBody"):
 @api_router.post("/packages")
 async def create_package(body: PackageBody, user: dict = Depends(require_roles("admin", "guru"))):
     _check_pkg_thresholds(body)
-    pkg = Package(**body.model_dump())
+    data = body.model_dump()
+    data["created_by"] = user["id"]
+    pkg = Package(**data)
     await db.packages.insert_one(pkg.model_dump())
     return pkg.model_dump()
 
@@ -454,12 +471,22 @@ async def create_package(body: PackageBody, user: dict = Depends(require_roles("
 @api_router.put("/packages/{pid}")
 async def update_package(pid: str, body: PackageBody, user: dict = Depends(require_roles("admin", "guru"))):
     _check_pkg_thresholds(body)
+    existing = await db.packages.find_one({"id": pid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Paket tidak ditemukan")
+    if user["role"] != "admin" and existing.get("created_by") and existing["created_by"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Hanya pemilik yang dapat mengubah paket ini")
     await db.packages.update_one({"id": pid}, {"$set": body.model_dump()})
     return await db.packages.find_one({"id": pid}, {"_id": 0})
 
 
 @api_router.delete("/packages/{pid}")
 async def delete_package(pid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    existing = await db.packages.find_one({"id": pid}, {"_id": 0})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Paket tidak ditemukan")
+    if user["role"] != "admin" and existing.get("created_by") and existing["created_by"] != user["id"]:
+        raise HTTPException(status_code=403, detail="Hanya pemilik yang dapat menghapus paket ini")
     await db.packages.delete_one({"id": pid})
     return {"ok": True}
 
@@ -1060,6 +1087,98 @@ async def get_file(path: str, authorization: Optional[str] = Header(None), auth:
     except Exception:
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
     return Response(content=data, media_type=record.get("content_type", content_type))
+
+
+# ------------------------------------------------------------------ STUDENT REPORT PDF
+@api_router.get("/report/student/{student_id}/pdf")
+async def student_report_pdf(student_id: str, user: dict = Depends(get_current_user)):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.graphics.shapes import Drawing
+    from reportlab.graphics.charts.barcharts import VerticalBarChart
+
+    if student_id == "me":
+        student_id = user["id"]
+    if user["role"] == "siswa" and student_id != user["id"]:
+        raise HTTPException(status_code=403, detail="Akses ditolak")
+    stu = await db.users.find_one({"_id": ObjectId(student_id)})
+    if not stu:
+        raise HTTPException(status_code=404, detail="Siswa tidak ditemukan")
+
+    attempts = await db.attempts.find(
+        {"student_id": student_id, "status": {"$ne": "berlangsung"}}, {"_id": 0}
+    ).sort("submitted_at", 1).to_list(2000)
+    pkgs = await db.packages.find({}, {"_id": 0, "id": 1, "category_id": 1}).to_list(2000)
+    pkg_cat = {p["id"]: p.get("category_id") for p in pkgs}
+    cats = await db.categories.find({}, {"_id": 0}).to_list(1000)
+    cat_name = {c["id"]: c["name"] for c in cats}
+
+    rows_data = []
+    scores = []
+    labels = []
+    for a in attempts:
+        s = await db.sessions.find_one({"id": a["session_id"]}, {"_id": 0})
+        subj = cat_name.get(pkg_cat.get(a.get("package_id")), "Umum")
+        kkm = s.get("kkm", 75) if s else 75
+        sc = a.get("score")
+        status = "Lulus" if (sc is not None and sc >= kkm) else ("Belum Lulus" if sc is not None else "Menunggu")
+        rows_data.append([s["title"] if s else "-", subj, str(sc) if sc is not None else "-", str(kkm), status])
+        if sc is not None:
+            scores.append(sc)
+            labels.append((s["title"] if s else "-")[:10])
+
+    green = colors.HexColor("#1e3a30")
+    terra = colors.HexColor("#c0563f")
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
+    styles = getSampleStyleSheet()
+    sub = ParagraphStyle("sub", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
+    elems = [Paragraph("RAPOR HASIL BELAJAR SISWA", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
+             Paragraph("Computer Based Test", sub), Spacer(1, 8 * mm)]
+
+    avg = round(sum(scores) / len(scores), 1) if scores else 0
+    info = [["Nama Siswa", stu["name"], "Rata-rata", str(avg)],
+            ["NISN / NIP", stu.get("identifier", "") or "-", "Total Ujian", str(len(scores))]]
+    t = Table(info, colWidths=[32 * mm, 62 * mm, 30 * mm, 42 * mm])
+    t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+                           ("TEXTCOLOR", (2, 0), (2, -1), colors.grey), ("FONTNAME", (3, 0), (3, 0), "Helvetica-Bold"),
+                           ("TEXTCOLOR", (3, 0), (3, 0), green), ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8"))]))
+    elems += [t, Spacer(1, 8 * mm)]
+
+    if scores:
+        elems.append(Paragraph("Grafik Perkembangan Nilai", ParagraphStyle("s2", parent=styles["Heading2"], textColor=green, fontSize=12)))
+        d = Drawing(460, 190)
+        bc = VerticalBarChart()
+        bc.x, bc.y, bc.height, bc.width = 30, 20, 150, 420
+        bc.data = [scores]
+        bc.categoryAxis.categoryNames = labels
+        bc.categoryAxis.labels.fontSize = 6
+        bc.categoryAxis.labels.angle = 30
+        bc.categoryAxis.labels.dy = -6
+        bc.valueAxis.valueMin, bc.valueAxis.valueMax, bc.valueAxis.valueStep = 0, 100, 20
+        bc.bars[0].fillColor = green
+        d.add(bc)
+        elems += [d, Spacer(1, 6 * mm)]
+
+    elems.append(Paragraph("Rincian Nilai", ParagraphStyle("s3", parent=styles["Heading2"], textColor=green, fontSize=12)))
+    trows = [["Sesi Ujian", "Mapel", "Nilai", "KKM", "Status"]] + (rows_data or [["Belum ada ujian", "-", "-", "-", "-"]])
+    dt = Table(trows, colWidths=[70 * mm, 40 * mm, 20 * mm, 18 * mm, 26 * mm], repeatRows=1)
+    dt.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, 0), green), ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+                            ("FONTSIZE", (0, 0), (-1, -1), 8), ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+                            ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f6f0")]),
+                            ("GRID", (0, 0), (-1, -1), 0.3, colors.HexColor("#e0e0d8")),
+                            ("TOPPADDING", (0, 0), (-1, -1), 4), ("BOTTOMPADDING", (0, 0), (-1, -1), 4)]))
+    elems += [dt, Spacer(1, 10 * mm),
+              Paragraph(f"Dicetak pada {datetime.now(timezone.utc).strftime('%d-%m-%Y %H:%M UTC')}", sub)]
+    doc.build(elems)
+    buf.seek(0)
+    fname = f"rapor-{stu['name']}.pdf".replace(" ", "_")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
 # ------------------------------------------------------------------ AUTO-SUBMIT (cron)

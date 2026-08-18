@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2 } from "lucide-react";
+import { Plus, Pencil, Trash2, FileText } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { ROLE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
@@ -55,6 +55,15 @@ export default function Accounts() {
     await api.delete(`/users/${u.id}`); toast.success("Akun dihapus"); load();
   };
 
+  const downloadReport = async (u) => {
+    try {
+      const res = await api.get(`/report/student/${u.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a"); a.href = url; a.download = `rapor-${u.name}.pdf`; a.click();
+      toast.success("Rapor diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   const shown = filter === "all" ? users : users.filter((u) => u.role === filter);
 
   const roleColor = { admin: "bg-accent/15 text-accent", guru: "bg-primary/10 text-primary", siswa: "bg-secondary/20 text-secondary-foreground" };
@@ -99,6 +108,9 @@ export default function Accounts() {
                 <TableCell className="text-muted-foreground">{u.identifier || "-"}</TableCell>
                 <TableCell><Badge className={`${roleColor[u.role]} border-0`}>{ROLE_LABEL[u.role]}</Badge></TableCell>
                 <TableCell className="text-right">
+                  {u.role === "siswa" && (
+                    <button onClick={() => downloadReport(u)} data-testid={`report-btn-${u.id}`} className="text-muted-foreground hover:text-primary p-1 mr-1" title="Unduh Rapor"><FileText className="h-4 w-4" /></button>
+                  )}
                   <button onClick={() => openEdit(u)} className="text-muted-foreground hover:text-primary p-1 mr-1"><Pencil className="h-4 w-4" /></button>
                   <button onClick={() => remove(u)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
                 </TableCell>

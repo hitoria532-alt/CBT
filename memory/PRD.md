@@ -73,6 +73,11 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Statistik Mapel**: chart "Rata-rata Nilai per Mata Pelajaran" di dashboard admin via `/api/analytics/subjects` (terkuat→terlemah).
 - Verified: 16/16 pytest iter-8 lolos + frontend E2E 100%, tanpa bug.
 
+## Implemented (2026-08-18) — Iteration 9
+- **Rapor Siswa PDF**: `/api/report/student/{id}/pdf` (reportlab) — identitas, rata-rata, grafik perkembangan nilai, tabel rincian. Admin/guru unduh untuk siswa mana pun (tombol di Manajemen Akun); siswa unduh rapor sendiri (alias `me`) via tombol "Unduh Rapor" di Hasil Saya (siswa lain → 403).
+- **Bank Soal Publik**: paket punya `created_by` + `is_public`; guru melihat paket sendiri + publik + legacy; toggle "Bagikan ke Guru Lain". Edit/Hapus hanya pemilik/admin (403 untuk non-pemilik) — bug delete tanpa cek kepemilikan sudah diperbaiki & diverifikasi (403/200/404).
+- Verified: setelah fix, permission delete/update paket benar; PDF rapor 200 (admin/self) & 403 (siswa lain).
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus

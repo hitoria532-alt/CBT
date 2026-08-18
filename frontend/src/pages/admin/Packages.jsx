@@ -17,7 +17,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false, min_score: 0, rounding: "2desimal", easy_min: null, medium_min: null };
+const EMPTY = { title: "", description: "", category_id: "", question_ids: [], scoring_method: "percentage", shuffle_questions: false, shuffle_options: false, min_score: 0, rounding: "2desimal", easy_min: null, medium_min: null, is_public: false };
 
 export default function Packages() {
   const [items, setItems] = useState([]);
@@ -41,7 +41,7 @@ export default function Packages() {
       question_ids: p.question_ids || [], scoring_method: p.scoring_method || "percentage",
       shuffle_questions: !!p.shuffle_questions, shuffle_options: !!p.shuffle_options,
       min_score: p.min_score ?? 0, rounding: p.rounding || "2desimal",
-      easy_min: p.easy_min ?? null, medium_min: p.medium_min ?? null });
+      easy_min: p.easy_min ?? null, medium_min: p.medium_min ?? null, is_public: !!p.is_public });
     setOpen(true);
   };
 
@@ -90,8 +90,14 @@ export default function Packages() {
               <div className="flex items-start justify-between">
                 <h3 className="font-heading text-lg font-medium pr-2">{p.title}</h3>
                 <div className="flex gap-1 shrink-0">
-                  <button onClick={() => openEdit(p)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
-                  <button onClick={() => remove(p)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
+                  {p.is_owner ? (
+                    <>
+                      <button onClick={() => openEdit(p)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
+                      <button onClick={() => remove(p)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
+                    </>
+                  ) : (
+                    <Badge variant="outline" className="text-xs">oleh {p.owner_name}</Badge>
+                  )}
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mt-1 mb-4 line-clamp-2">{p.description || "Tanpa deskripsi"}</p>
@@ -100,6 +106,7 @@ export default function Packages() {
                 <Badge variant="outline">{p.scoring_method === "weighted" ? "Berbobot" : "Persentase"}</Badge>
                 {p.shuffle_questions && <Badge variant="outline">Soal Acak</Badge>}
                 {p.shuffle_options && <Badge variant="outline">Opsi Acak</Badge>}
+                {p.is_public && <Badge className="bg-accent/15 text-accent border-0" data-testid={`public-badge-${p.id}`}>Publik</Badge>}
               </div>
             </div>
           ))}
@@ -155,6 +162,13 @@ export default function Packages() {
                   <p className="text-xs text-muted-foreground">Untuk soal pilihan ganda</p>
                 </div>
                 <Switch checked={form.shuffle_options} onCheckedChange={(v) => setForm({ ...form, shuffle_options: v })} data-testid="shuffle-options-switch" />
+              </div>
+              <div className="flex items-center justify-between gap-3 col-span-2">
+                <div>
+                  <Label>Bagikan ke Guru Lain (Publik)</Label>
+                  <p className="text-xs text-muted-foreground">Guru lain bisa memakai paket ini untuk sesi mereka</p>
+                </div>
+                <Switch checked={form.is_public} onCheckedChange={(v) => setForm({ ...form, is_public: v })} data-testid="public-switch" />
               </div>
             </div>
 

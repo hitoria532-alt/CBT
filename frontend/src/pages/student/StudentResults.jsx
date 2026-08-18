@@ -1,10 +1,12 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ClipboardList, ChevronRight } from "lucide-react";
-import api from "../../lib/api";
+import { ClipboardList, ChevronRight, FileDown } from "lucide-react";
+import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL } from "../../lib/utils2";
 import { Badge } from "../../components/ui/badge";
+import { Button } from "../../components/ui/button";
+import { toast } from "sonner";
 
 export default function StudentResults() {
   const [items, setItems] = useState([]);
@@ -12,10 +14,24 @@ export default function StudentResults() {
 
   useEffect(() => { api.get("/results/me").then((r) => setItems(r.data)); }, []);
 
+  const downloadReport = async () => {
+    try {
+      const res = await api.get(`/report/student/me/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a"); a.href = url; a.download = "rapor-saya.pdf"; a.click();
+      toast.success("Rapor diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} data-testid="student-results">
-      <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Laporan</p>
-      <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1 mb-8">Hasil Ujian Saya</h1>
+      <div className="flex items-end justify-between gap-4 flex-wrap mb-8">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Laporan</p>
+          <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Hasil Ujian Saya</h1>
+        </div>
+        <Button variant="outline" onClick={downloadReport} data-testid="download-report-btn"><FileDown className="h-4 w-4 mr-2" />Unduh Rapor (PDF)</Button>
+      </div>
 
       {items.length === 0 ? (
         <div className="border border-dashed border-border rounded-md p-16 text-center text-muted-foreground">
