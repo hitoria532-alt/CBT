@@ -29,10 +29,12 @@ function Stat({ icon: Icon, label, value, accent }) {
 export default function Dashboard() {
   const [s, setS] = useState(null);
   const [ca, setCa] = useState(null);
+  const [subs, setSubs] = useState(null);
 
   useEffect(() => {
     api.get("/dashboard/stats").then((r) => setS(r.data)).catch(() => {});
     api.get("/analytics/classes").then((r) => setCa(r.data)).catch(() => {});
+    api.get("/analytics/subjects").then((r) => setSubs(r.data)).catch(() => {});
   }, []);
 
   if (!s) return <div className="text-muted-foreground">Memuat...</div>;
@@ -127,6 +129,25 @@ export default function Dashboard() {
               <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Belum ada nilai ujian.</div>
             )}
           </div>
+        </div>
+      </div>
+      <div className="bg-card border border-border rounded-md p-6 mt-6" data-testid="subject-stats-chart">
+        <h3 className="font-heading text-xl font-medium mb-1">Rata-rata Nilai per Mata Pelajaran</h3>
+        <p className="text-sm text-muted-foreground mb-6">Materi terkuat (kiri) hingga terlemah (kanan)</p>
+        <div className="h-72">
+          {subs && subs.some((x) => x.attempts > 0) ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={subs.filter((x) => x.attempts > 0)} margin={{ left: -8 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke="hsl(var(--border))" vertical={false} />
+                <XAxis dataKey="name" stroke="hsl(var(--muted-foreground))" fontSize={11} />
+                <YAxis domain={[0, 100]} stroke="hsl(var(--muted-foreground))" fontSize={12} />
+                <Tooltip contentStyle={{ background: "hsl(var(--card))", border: "1px solid hsl(var(--border))", borderRadius: "0.5rem", fontSize: "0.85rem" }} />
+                <Bar dataKey="avg_score" name="Rata-rata" fill="hsl(var(--chart-4))" radius={[4, 4, 0, 0]} maxBarSize={56} />
+              </BarChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="h-full flex items-center justify-center text-sm text-muted-foreground">Belum ada nilai per mata pelajaran.</div>
+          )}
         </div>
       </div>
     </motion.div>

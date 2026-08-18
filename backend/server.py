@@ -1266,6 +1266,31 @@ async def analytics_classes(user: dict = Depends(require_roles("admin", "guru"))
     return {"classes": result, "trend": trend}
 
 
+# ------------------------------------------------------------------ SUBJECT STATS
+@api_router.get("/analytics/subjects")
+async def analytics_subjects(user: dict = Depends(require_roles("admin", "guru"))):
+    cats = await db.categories.find({}, {"_id": 0}).to_list(1000)
+    pkgs = await db.packages.find({}, {"_id": 0, "id": 1, "category_id": 1}).to_list(2000)
+    pkg_cat = {p["id"]: p.get("category_id") for p in pkgs}
+    atts = await db.attempts.find({"status": "selesai"}, {"_id": 0, "score": 1, "package_id": 1}).to_list(20000)
+    agg = {}
+    for a in atts:
+        if a.get("score") is None:
+            continue
+        agg.setdefault(pkg_cat.get(a.get("package_id")), []).append(a["score"])
+    result = []
+    for c in cats:
+        sc = agg.get(c["id"], [])
+        result.append({"category_id": c["id"], "name": c["name"],
+                       "avg_score": round(sum(sc) / len(sc), 1) if sc else 0, "attempts": len(sc)})
+    uncat = agg.get(None, [])
+    if uncat:
+        result.append({"category_id": None, "name": "Umum",
+                       "avg_score": round(sum(uncat) / len(uncat), 1), "attempts": len(uncat)})
+    result.sort(key=lambda r: -r["avg_score"])
+    return result
+
+
 # ------------------------------------------------------------------ NOTIFICATIONS
 @api_router.get("/notifications")
 async def notifications(user: dict = Depends(require_roles("siswa"))):
@@ -1322,16 +1347,22 @@ async def set_difficulty(body: DifficultyBody, user: dict = Depends(require_role
 
 
 # ------------------------------------------------------------------ LEADERBOARD
-async def compute_class_leaderboard(cls: dict) -> list:
+async def compute_class_leaderboard(cls: dict, category_id: str = None) -> list:
     sids = cls.get("student_ids", [])
     if not sids:
         return []
+    pkg_ids = None
+    if category_id:
+        pkgs = await db.packages.find({"category_id": category_id}, {"_id": 0, "id": 1}).to_list(2000)
+        pkg_ids = {p["id"] for p in pkgs}
     docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in sids]}}).to_list(2000)
     rows = []
     for u in docs:
         uid = str(u["_id"])
-        atts = await db.attempts.find({"student_id": uid, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
-        scores = [a["score"] for a in atts if a.get("score") is not None]
+        atts = await db.attempts.find({"student_id": uid, "status": "selesai"},
+                                      {"_id": 0, "score": 1, "package_id": 1}).to_list(5000)
+        scores = [a["score"] for a in atts
+                  if a.get("score") is not None and (pkg_ids is None or a.get("package_id") in pkg_ids)]
         rows.append({
             "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
             "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
@@ -1352,12 +1383,12 @@ async def leaderboard_class(class_id: str, user: dict = Depends(require_roles("a
 
 
 @api_router.get("/leaderboard/me")
-async def leaderboard_me(user: dict = Depends(require_roles("siswa"))):
+async def leaderboard_me(category_id: Optional[str] = None, user: dict = Depends(require_roles("siswa"))):
     classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0}).to_list(1000)
     out = []
     for c in classes:
         out.append({"class_id": c["id"], "class_name": c["name"],
-                    "rows": await compute_class_leaderboard(c)})
+                    "rows": await compute_class_leaderboard(c, category_id)})
     return out
 
 

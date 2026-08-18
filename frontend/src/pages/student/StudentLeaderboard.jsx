@@ -3,6 +3,9 @@ import { motion } from "framer-motion";
 import { Trophy, Medal, Globe } from "lucide-react";
 import { useAuth } from "../../context/AuthContext";
 import api from "../../lib/api";
+import {
+  Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
+} from "../../components/ui/select";
 
 const MEDAL = { 1: "text-amber-400", 2: "text-slate-400", 3: "text-amber-700" };
 
@@ -28,13 +31,17 @@ export default function StudentLeaderboard() {
   const { user } = useAuth();
   const [groups, setGroups] = useState([]);
   const [global, setGlobal] = useState(null);
+  const [categories, setCategories] = useState([]);
+  const [catId, setCatId] = useState("all");
+
+  useEffect(() => { api.get("/categories").then((r) => setCategories(r.data)); }, []);
 
   useEffect(() => {
-    api.get("/leaderboard/me").then((r) => setGroups(r.data));
-    api.get("/leaderboard/global").then((r) => setGlobal(r.data.rows));
-  }, []);
+    const q = catId && catId !== "all" ? `?category_id=${catId}` : "";
+    api.get(`/leaderboard/me${q}`).then((r) => setGroups(r.data));
+    api.get(`/leaderboard/global${q}`).then((r) => setGlobal(r.data.rows));
+  }, [catId]);
 
-  // Global: show top 10 + own row if outside top 10
   let globalView = [];
   if (global) {
     globalView = global.slice(0, 10);
@@ -46,8 +53,22 @@ export default function StudentLeaderboard() {
 
   return (
     <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }} data-testid="student-leaderboard">
-      <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Kompetisi</p>
-      <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1 mb-8">Peringkat</h1>
+      <div className="flex items-end justify-between gap-4 flex-wrap mb-8">
+        <div>
+          <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Kompetisi</p>
+          <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Peringkat</h1>
+        </div>
+        <div className="space-y-1">
+          <label className="text-xs text-muted-foreground">Mata Pelajaran</label>
+          <Select value={catId} onValueChange={setCatId}>
+            <SelectTrigger className="w-52" data-testid="student-subject-filter"><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectItem value="all">Semua Mapel</SelectItem>
+              {categories.map((c) => <SelectItem key={c.id} value={c.id}>{c.name}</SelectItem>)}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
 
       <div className="mb-10" data-testid="lb-angkatan">
         <div className="flex items-center gap-2 mb-4">

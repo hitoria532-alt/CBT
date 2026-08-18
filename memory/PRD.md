@@ -68,6 +68,11 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Ekspor Peringkat**: tombol "Ekspor Excel" mengunduh papan peringkat angkatan (mengikuti filter aktif) via `/api/export/leaderboard/xlsx` (openpyxl, hanya admin/guru).
 - Verified: 12/12 pytest iter-7 lolos + frontend E2E 100%, tanpa isu.
 
+## Implemented (2026-08-18) — Iteration 8
+- **Filter Peringkat Siswa**: filter mata pelajaran (kategori) di halaman peringkat siswa, berlaku untuk seksi Angkatan & per-kelas via `/api/leaderboard/me?category_id=`.
+- **Statistik Mapel**: chart "Rata-rata Nilai per Mata Pelajaran" di dashboard admin via `/api/analytics/subjects` (terkuat→terlemah).
+- Verified: 16/16 pytest iter-8 lolos + frontend E2E 100%, tanpa bug.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus
