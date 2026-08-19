@@ -8,7 +8,7 @@ import {
   BarChart, Bar, XAxis, YAxis, ResponsiveContainer, Tooltip, CartesianGrid,
   LineChart, Line,
 } from "recharts";
-import api from "../../lib/api";
+import api, { fileUrl } from "../../lib/api";
 
 function Stat({ icon: Icon, label, value, accent }) {
   return (
@@ -30,11 +30,13 @@ export default function Dashboard() {
   const [s, setS] = useState(null);
   const [ca, setCa] = useState(null);
   const [subs, setSubs] = useState(null);
+  const [school, setSchool] = useState({ name: "", logo_path: null });
 
   useEffect(() => {
     api.get("/dashboard/stats").then((r) => setS(r.data)).catch(() => {});
     api.get("/analytics/classes").then((r) => setCa(r.data)).catch(() => {});
     api.get("/analytics/subjects").then((r) => setSubs(r.data)).catch(() => {});
+    api.get("/settings/school").then((r) => setSchool(r.data)).catch(() => {});
   }, []);
 
   if (!s) return <div className="text-muted-foreground">Memuat...</div>;
@@ -61,12 +63,12 @@ export default function Dashboard() {
         <div className="absolute right-24 -bottom-16 h-40 w-40 rounded-full bg-accent/15" />
         <div className="relative flex items-center gap-6 flex-wrap">
           <div className="h-24 w-24 rounded-2xl bg-primary-foreground/10 border border-primary-foreground/20 flex items-center justify-center shrink-0 overflow-hidden backdrop-blur">
-            <img src="/school-logo.png" alt="Logo Sekolah" data-testid="school-logo" className="h-20 w-20 object-contain" />
+            <img src={school.logo_path ? fileUrl(school.logo_path) : "/school-logo.png"} alt="Logo Sekolah" data-testid="school-logo" className="h-20 w-20 object-contain" />
           </div>
           <div className="min-w-0 flex-1">
             <p className="text-xs font-bold uppercase tracking-[0.3em] text-primary-foreground/60">Selamat Datang</p>
-            <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Dashboard CBT Ujian</h1>
-            <p className="text-primary-foreground/70 mt-2 text-sm capitalize">{today}</p>
+            <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">{school.name || "Dashboard CBT Ujian"}</h1>
+            <p className="text-primary-foreground/70 mt-2 text-sm capitalize">{school.address || today}</p>
           </div>
           <div className="text-right pl-4 border-l border-primary-foreground/15">
             <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary-foreground/60">Rata-rata Nilai</p>

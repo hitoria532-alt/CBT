@@ -86,6 +86,13 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - **Duplikat Paket**: `POST /api/packages/{id}/duplicate` — guru menyalin paket (publik milik guru lain, atau miliknya) menjadi paket baru miliknya ("… (Salinan)", is_public=false) untuk diubah bebas. Menyalin paket privat milik guru lain → 403. Tombol "Duplikat" (ikon copy) di tiap kartu paket.
 - Verified: guru B menyalin paket publik guru A (jadi milik B & privat), salinan muncul di daftar B; salin paket privat orang lain 403; Packages.jsx parse OK.
 
+## Implemented (2026-08-19) — Iteration 12 (Identitas Sekolah)
+- **Pengaturan Sekolah**: menu admin baru (`/admin/pengaturan`) untuk atur nama, alamat, **unggah logo**, dan **tema warna**. Endpoint `/api/settings/school` (GET semua, PUT admin).
+- **Logo & Identitas di Dashboard**: banner hero memakai logo & nama sekolah tersimpan (fallback logo bawaan).
+- **Kop Rapor**: rapor siswa & rapor kelas PDF kini menampilkan logo + nama + alamat sekolah di kop (via `_school_kop`).
+- **Tema Warna**: pilihan warna (6 preset) diterapkan ke `--primary`/`--ring` global saat app dimuat.
+- Verified: PUT/GET school OK; report PDF dgn kop 200 %PDF; semua file frontend parse OK.
+
 ## Backlog (P1/P2)
 - P1: Bank soal impor Excel/CSV, acak urutan soal per siswa
 - P1: Cascade delete attempts saat user dihapus

@@ -277,6 +277,13 @@ class DifficultyBody(BaseModel):
     medium_min: float = 40.0
 
 
+class SchoolBody(BaseModel):
+    name: str = ""
+    address: str = ""
+    logo_path: Optional[str] = None
+    theme_color: Optional[str] = None
+
+
 class StartAttemptBody(BaseModel):
     session_id: str
 
@@ -1158,7 +1165,8 @@ async def student_report_pdf(student_id: str, user: dict = Depends(get_current_u
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=20 * mm, bottomMargin=20 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
     styles = getSampleStyleSheet()
     sub = ParagraphStyle("sub", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
-    elems = [Paragraph("RAPOR HASIL BELAJAR SISWA", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
+    elems = await _school_kop(styles, green, sub)
+    elems += [Paragraph("RAPOR HASIL BELAJAR SISWA", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
              Paragraph("Computer Based Test", sub), Spacer(1, 8 * mm)]
 
     avg = round(sum(scores) / len(scores), 1) if scores else 0
@@ -1234,7 +1242,8 @@ async def class_report_pdf(class_id: str, user: dict = Depends(require_roles("ad
 
     buf = io.BytesIO()
     doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=18 * mm, bottomMargin=18 * mm, leftMargin=18 * mm, rightMargin=18 * mm)
-    elems = [Paragraph(f"RAPOR KELAS {cls['name'].upper()}", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
+    elems = await _school_kop(styles, green, sub)
+    elems += [Paragraph(f"RAPOR KELAS {cls['name'].upper()}", ParagraphStyle("h", parent=styles["Title"], textColor=green, fontSize=18, spaceAfter=2)),
              Paragraph(f"{len(students)} siswa · Computer Based Test", sub), Spacer(1, 8 * mm)]
     if not students:
         elems.append(Paragraph("Belum ada siswa di kelas ini.", styles["Normal"]))
@@ -1554,6 +1563,55 @@ async def notifications(user: dict = Depends(require_roles("siswa"))):
                               "message": "Ujian sedang berlangsung — segera kerjakan.", "time": s["start_time"]})
     notes.sort(key=lambda n: n["time"], reverse=True)
     return notes
+
+
+# ------------------------------------------------------------------ SCHOOL SETTINGS
+@api_router.get("/settings/school")
+async def get_school(user: dict = Depends(get_current_user)):
+    doc = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    return {"name": doc.get("name", ""), "address": doc.get("address", ""),
+            "logo_path": doc.get("logo_path"), "theme_color": doc.get("theme_color")}
+
+
+@api_router.put("/settings/school")
+async def set_school(body: SchoolBody, user: dict = Depends(require_roles("admin"))):
+    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **body.model_dump()}}, upsert=True)
+    return body.model_dump()
+
+
+def _logo_flowable(logo_path):
+    from reportlab.platypus import Image
+    from reportlab.lib.units import mm
+    try:
+        if not logo_path:
+            return None
+        data, _ = get_object(logo_path)
+        return Image(io.BytesIO(data), width=18 * mm, height=18 * mm)
+    except Exception:
+        return None
+
+
+async def _school_kop(styles, green, sub):
+    from reportlab.platypus import Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import ParagraphStyle
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    if not (school.get("name") or school.get("logo_path")):
+        return []
+    txt = []
+    if school.get("name"):
+        txt.append(Paragraph(school["name"], ParagraphStyle("sn", parent=styles["Title"], textColor=green, fontSize=15, spaceAfter=0)))
+    if school.get("address"):
+        txt.append(Paragraph(school["address"], sub))
+    logo = _logo_flowable(school.get("logo_path"))
+    if logo:
+        t = Table([[logo, txt]], colWidths=[22 * 2.83, None])
+        t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (0, 0), 0)]))
+        head = [t]
+    else:
+        head = txt
+    from reportlab.lib import colors
+    line = Table([[""]], colWidths=[520 * 0.35])
+    return head + [Spacer(1, 6)]
 
 
 # ------------------------------------------------------------------ DIFFICULTY SETTINGS

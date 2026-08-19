@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import "./App.css";
+import api from "./lib/api";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { Toaster } from "sonner";
 import { AuthProvider, useAuth } from "./context/AuthContext";
@@ -15,6 +16,7 @@ import Classes from "./pages/admin/Classes";
 import Results from "./pages/admin/Results";
 import Accounts from "./pages/admin/Accounts";
 import Leaderboard from "./pages/admin/Leaderboard";
+import SchoolSettings, { applyTheme } from "./pages/admin/SchoolSettings";
 import StudentHome from "./pages/student/StudentHome";
 import ExamView from "./pages/student/ExamView";
 import StudentResults from "./pages/student/StudentResults";
@@ -46,6 +48,9 @@ function Root() {
 }
 
 function App() {
+  useEffect(() => {
+    api.get("/settings/school").then((r) => applyTheme(r.data.theme_color)).catch(() => {});
+  }, []);
   return (
     <div className="App">
       <AuthProvider>
@@ -72,6 +77,7 @@ function App() {
               <Route path="kelas" element={<Classes />} />
               <Route path="hasil" element={<Results />} />
               <Route path="peringkat" element={<Leaderboard />} />
+              <Route path="pengaturan" element={<SchoolSettings />} />
               <Route path="akun" element={<Accounts />} />
             </Route>
 
