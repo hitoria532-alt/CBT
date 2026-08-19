@@ -12,13 +12,13 @@ import api from "../../lib/api";
 
 function Stat({ icon: Icon, label, value, accent }) {
   return (
-    <div className="bg-card border border-border rounded-md p-6 hover:shadow-sm transition-shadow">
+    <div className="group relative bg-card border border-border rounded-xl p-6 overflow-hidden hover:shadow-md hover:-translate-y-0.5 transition-all duration-300">
       <div className="flex items-start justify-between">
         <div>
           <p className="text-xs font-bold uppercase tracking-[0.15em] text-muted-foreground">{label}</p>
           <p className="font-heading text-3xl font-semibold mt-2">{value}</p>
         </div>
-        <div className={`h-10 w-10 rounded-md flex items-center justify-center ${accent}`}>
+        <div className={`h-11 w-11 rounded-xl flex items-center justify-center ${accent} group-hover:scale-110 transition-transform duration-300`}>
           <Icon className="h-5 w-5" />
         </div>
       </div>
@@ -39,6 +39,8 @@ export default function Dashboard() {
 
   if (!s) return <div className="text-muted-foreground">Memuat...</div>;
 
+  const today = new Date().toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+
   const chartData = [
     { name: "Siswa", jumlah: s.students },
     { name: "Guru", jumlah: s.teachers },
@@ -54,10 +56,25 @@ export default function Dashboard() {
       transition={{ duration: 0.3 }}
       data-testid="admin-dashboard"
     >
-      <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Ringkasan</p>
-      <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1 mb-8">
-        Dashboard
-      </h1>
+      <div className="relative overflow-hidden rounded-2xl bg-primary text-primary-foreground p-8 sm:p-10 mb-8 shadow-sm">
+        <div className="absolute -right-16 -top-20 h-64 w-64 rounded-full bg-primary-foreground/5" />
+        <div className="absolute right-24 -bottom-16 h-40 w-40 rounded-full bg-accent/15" />
+        <div className="relative flex items-center gap-6 flex-wrap">
+          <div className="h-24 w-24 rounded-2xl bg-primary-foreground/10 border border-primary-foreground/20 flex items-center justify-center shrink-0 overflow-hidden backdrop-blur">
+            <img src="/school-logo.png" alt="Logo Sekolah" data-testid="school-logo" className="h-20 w-20 object-contain" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-bold uppercase tracking-[0.3em] text-primary-foreground/60">Selamat Datang</p>
+            <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Dashboard CBT Ujian</h1>
+            <p className="text-primary-foreground/70 mt-2 text-sm capitalize">{today}</p>
+          </div>
+          <div className="text-right pl-4 border-l border-primary-foreground/15">
+            <p className="text-[11px] font-bold uppercase tracking-[0.2em] text-primary-foreground/60">Rata-rata Nilai</p>
+            <p className="font-heading text-5xl font-bold mt-1">{s.avg_score}</p>
+            <p className="text-xs text-primary-foreground/60 mt-1">{s.completed_attempts} ujian selesai</p>
+          </div>
+        </div>
+      </div>
 
       <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
         <Stat icon={GraduationCap} label="Total Siswa" value={s.students} accent="bg-primary/10 text-primary" />
@@ -70,7 +87,7 @@ export default function Dashboard() {
         <Stat icon={AlertCircle} label="Perlu Dikoreksi" value={s.pending_grading} accent="bg-accent/10 text-accent" />
       </div>
 
-      <div className="bg-card border border-border rounded-md p-6 mt-8">
+      <div className="bg-card border border-border rounded-xl p-6 mt-8">
         <h3 className="font-heading text-xl font-medium mb-6">Statistik Data</h3>
         <div className="h-72">
           <ResponsiveContainer width="100%" height="100%">
@@ -91,7 +108,7 @@ export default function Dashboard() {
       </div>
 
       <div className="grid gap-6 lg:grid-cols-2 mt-6">
-        <div className="bg-card border border-border rounded-md p-6" data-testid="class-avg-chart">
+        <div className="bg-card border border-border rounded-xl p-6" data-testid="class-avg-chart">
           <h3 className="font-heading text-xl font-medium mb-1">Rata-rata Nilai per Kelas</h3>
           <p className="text-sm text-muted-foreground mb-6">Perbandingan capaian antar kelas</p>
           <div className="h-64">
@@ -111,7 +128,7 @@ export default function Dashboard() {
           </div>
         </div>
 
-        <div className="bg-card border border-border rounded-md p-6" data-testid="score-trend-chart">
+        <div className="bg-card border border-border rounded-xl p-6" data-testid="score-trend-chart">
           <h3 className="font-heading text-xl font-medium mb-1">Tren Rata-rata Nilai</h3>
           <p className="text-sm text-muted-foreground mb-6">Rata-rata nilai tiap sesi ujian</p>
           <div className="h-64">
@@ -131,7 +148,7 @@ export default function Dashboard() {
           </div>
         </div>
       </div>
-      <div className="bg-card border border-border rounded-md p-6 mt-6" data-testid="subject-stats-chart">
+      <div className="bg-card border border-border rounded-xl p-6 mt-6" data-testid="subject-stats-chart">
         <h3 className="font-heading text-xl font-medium mb-1">Rata-rata Nilai per Mata Pelajaran</h3>
         <p className="text-sm text-muted-foreground mb-6">Materi terkuat (kiri) hingga terlemah (kanan)</p>
         <div className="h-72">
