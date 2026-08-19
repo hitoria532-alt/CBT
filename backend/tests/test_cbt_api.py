@@ -156,20 +156,31 @@ class TestDashboard:
 # NOTE: siswa can only submit once. We test start (returns questions) and results endpoints.
 # We create a NEW student & attempt via admin to test full submit + grade + weighted math.
 class TestExamFlow:
-    def test_start_exam_seeded(self, siswa_ctx):
-        # Find session id
-        r = requests.get(f"{API}/sessions", headers=H(siswa_ctx["token"]))
-        session = next(s for s in r.json() if s["title"] == "UH Matematika - Kelas X")
-        r2 = requests.post(f"{API}/exam/start", headers=H(siswa_ctx["token"]),
-                           json={"session_id": session["id"]})
-        assert r2.status_code == 200, r2.text
-        data = r2.json()
-        assert len(data["questions"]) == 3
-        types = [q["type"] for q in data["questions"]]
-        assert set(types) == {"pg", "truefalse", "essay"}
-        # ensure correct_answer not leaked
-        for q in data["questions"]:
-            assert "correct_answer" not in q
+    def test_start_exam_seeded(self, admin_token):
+        # use a throwaway student so the test does not depend on who has already
+        # taken the seeded session
+        email = f"test_start_{int(time.time())}@example.com"
+        cu = requests.post(f"{API}/users", headers=H(admin_token),
+                           json={"email": email, "password": "pw12345",
+                                 "name": "TEST Start", "role": "siswa"})
+        assert cu.status_code == 200, cu.text
+        new_uid = cu.json()["id"]
+        try:
+            tok, _ = _login({"email": email, "password": "pw12345"})
+            r = requests.get(f"{API}/sessions", headers=H(tok))
+            session = next(s for s in r.json() if s["title"] == "UH Matematika - Kelas X")
+            r2 = requests.post(f"{API}/exam/start", headers=H(tok),
+                               json={"session_id": session["id"]})
+            assert r2.status_code == 200, r2.text
+            data = r2.json()
+            assert len(data["questions"]) == 3
+            types = [q["type"] for q in data["questions"]]
+            assert set(types) == {"pg", "truefalse", "essay"}
+            # ensure correct_answer not leaked
+            for q in data["questions"]:
+                assert "correct_answer" not in q
+        finally:
+            requests.delete(f"{API}/users/{new_uid}", headers=H(admin_token))
 
     def test_full_flow_new_student(self, admin_token):
         # Get session + package + questions

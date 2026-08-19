@@ -202,7 +202,8 @@ class TestDifficultyThreshold:
         requests.put(f"{API}/settings/difficulty", headers=H(admin_token),
                      json={"easy_min": 90, "medium_min": 60}, timeout=15)
         an2 = requests.get(f"{API}/analytics/session/{sid}", headers=H(admin_token), timeout=15).json()
-        assert an2["thresholds"] == {"easy_min": 90, "medium_min": 60}
+        assert an2["thresholds"]["easy_min"] == 90
+        assert an2["thresholds"]["medium_min"] == 60
         for it in an2["items"]:
             p = it["percent_correct"]
             expected = "Mudah" if p >= 90 else ("Sedang" if p >= 60 else "Sulit")

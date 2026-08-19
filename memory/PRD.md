@@ -104,3 +104,116 @@ Aplikasi CBT/ujian soal lengkap dengan pengolahan nilai + rumus pengolahan nilai
 - Admin: hitoria532@gmail.com / admin123
 - Guru: guru@sekolah.id / guru123
 - Siswa: siswa@sekolah.id / siswa123
+
+## Restore from GitHub (2026-08-19)
+Repo `hitoria532-alt/CBT` (branch `main`, 14 commits, latest `35675c1`) was re-cloned into
+`/app` and brought back online on the Emergent live preview.
+
+**What had to be recreated** (these are gitignored, so they were NOT in the repo):
+- `/app/backend/.env`: `JWT_SECRET` (regenerated — old tokens invalid), `ADMIN_EMAIL`,
+  `ADMIN_PASSWORD`, `EMERGENT_LLM_KEY` (object storage for question images),
+  `WEBHOOK_CRON_SECRET` (auto-submit cron).
+- MongoDB data: the database was empty. Baseline content is now re-seeded via the new
+  idempotent `/app/scripts/seed_demo.py`. See `/app/memory/test_credentials.md`.
+
+**Dependencies installed**: `reportlab`, `openpyxl` (were missing from the image);
+`requirements.txt` refreshed via pip freeze. Frontend deps were already complete.
+
+**Bugs found & fixed during the restore**
+- HTTP 500 on `/api/results/detail/{id}`, `/api/results/detail/{id}/pdf`,
+  `/api/results/grade/{id}` and on submit when a **package had been deleted after** an
+  exam was taken. Added `attempt_question_ids()` which falls back to the attempt's stored
+  `details`/`question_order`, so historical results and PDFs keep working.
+- `/api/exam/start` and `/api/analytics/session/{id}` now return a clear 400
+  ("Paket soal untuk sesi ini sudah dihapus") instead of a 500 when a session's package
+  is missing.
+- `/admin/akun` and `/admin/pengaturan` were reachable by **guru** via direct URL even
+  though the sidebar hid them — both routes are now admin-only in `App.js`.
+- `GET /api/settings/school` is now public (school name/theme is branding needed before
+  login); this also removed 401 console noise on the login page.
+- Recharts console warnings on the dashboard eliminated with a new measured
+  `components/ChartBox.jsx` wrapper (explicit pixel width/height, still responsive).
+- Test debt cleaned: outdated threshold assertions in `test_iteration5.py` /
+  `test_iteration6.py`, a dead external image host in `test_iteration4.py`, and an
+  order-dependent exam-start test in `test_cbt_api.py`.
+
+**Verified**: 122/122 backend pytest pass; frontend E2E regression 95%+ with all reported
+issues fixed; result/rapor/class PDFs and class xlsx export all return 200; essay grading
+recomputes the score correctly (4/5 -> 80.0).
+
+## Implemented (2026-08-19) — Iteration 13: Pilihan Ganda A–E + Ekspor Excel Hasil
+- **Opsi PG A–E**: editor Bank Soal kini menyediakan 5 slot opsi (A–E) dengan tombol
+  "Tambah opsi" & hapus per baris (min 2, maks 5). Saat menyimpan hanya opsi kosong di
+  **akhir** yang dipangkas sehingga posisi A–E — dan indeks kunci jawaban — tidak pernah
+  bergeser. Validasi: minimal 2 opsi terisi, dan kunci tidak boleh menunjuk opsi kosong.
+- **Impor A–E**: kolom `option_e` ditambahkan pada impor CSV/Excel, huruf kunci `E`/`e`
+  dipetakan ke indeks 4, slot kosong di tengah tidak menggeser kunci, dan kunci yang
+  menunjuk opsi kosong ditolak dengan pesan jelas. Template unduhan diperbarui (5 opsi +
+  contoh baris baru). ExamView/ResultDetail sudah generik sehingga otomatis mendukung 5 opsi
+  (termasuk saat opsi diacak — indeks tampilan didekode kembali ke kunci asli).
+- **Ekspor Excel Hasil & Koreksi**: endpoint baru `GET /api/export/session/{id}/xlsx`
+  (admin+guru) memakai openpyxl, menghasilkan 3 lembar rapi:
+  1. `Rekap Nilai` — kop sekolah, blok info sesi (paket, mapel, jumlah soal, metode nilai,
+     durasi, KKM, jadwal), tabel peserta (No, Nama, NISN/NIP, Kelas, Status, Benar, Salah,
+     Kosong, Poin, Nilai, Predikat A–E, Keterangan Lulus/Belum, Waktu Kumpul) dengan warna
+     lulus/tidak lulus, baris zebra, header dibekukan + autofilter, blok `RINGKASAN`
+     (rata-rata, tertinggi, terendah, jumlah lulus, ketuntasan %), landscape fit-to-width.
+  2. `Rincian Jawaban` — matriks poin siswa × soal, sel diwarnai benar/salah/esai, teks soal
+     tersimpan sebagai komentar sel.
+  3. `Analisis Butir` — % benar & label Mudah/Sedang/Sulit per soal beserta ambang yang dipakai.
+  Tombol **Ekspor Excel** ditambahkan di halaman Hasil & Koreksi.
+- Verified: 14/14 pytest `test_iteration13.py` + E2E UI (5 input opsi A–E, simpan/edit kunci E,
+  unduh .xlsx berhasil).
+
+## Implemented (2026-08-19) — Iteration 14: Impor Siswa via Excel (Manajemen Kelas)
+- **Template Excel rapi**: `GET /api/students/import-template` menghasilkan workbook 2 lembar:
+  `Petunjuk` (7 langkah pengisian + keterangan tiap kolom + daftar kelas yang sudah ada) dan
+  `Data Siswa` (judul, header berwarna dengan komentar penjelas, 3 baris contoh abu-abu,
+  40 baris pra-format, header dibekukan, dropdown kelas, format teks pada NIS agar angka 0
+  di depan tidak hilang).
+- **Impor**: `POST /api/students/import` (khusus admin) menerima .xlsx/.csv dengan kolom
+  `nama, kelas, nis, username, password` (+ alias: nama siswa/email/nisn/rombel/kata sandi).
+  Membuat akun login siswa, membuat kelas otomatis bila belum ada, dan memasukkan siswa ke
+  kelasnya. Idempoten: username yang sudah ada akan **diperbarui**, bukan diduplikasi.
+  Validasi per baris: nama & username wajib, username harus format email, password minimal
+  5 karakter untuk siswa baru, username dobel dalam file ditolak, dan email milik akun
+  admin/guru tidak bisa diambil alih. Respons memuat ringkasan + daftar error per baris.
+- **UI**: tombol "Impor Siswa" di Manajemen Kelas (hanya admin) membuka dialog berisi tabel
+  keterangan kolom, tombol unduh template, pemilih file, dan panel hasil impor
+  (Siswa Baru / Diperbarui / Masuk Kelas, kelas baru yang dibuat, serta daftar baris dilewati).
+- Verified: 16/16 pytest `test_iteration14.py` (termasuk siswa hasil impor benar-benar bisa
+  login dan melihat sesi kelasnya) + E2E UI unggah file nyata.
+- Total suite: **152 passed, 2 skipped**.
+
+## Implemented (2026-08-19) — Iteration 15: Mode Ujian Ketat (anti-menyontek)
+Pilihan user: sanksi = peringatan lalu **kumpul otomatis** setelah N pelanggaran; mode
+**selalu aktif** untuk semua sesi; laporan pelanggaran **tampil di Hasil & Koreksi + masuk Excel**.
+
+**BATASAN JUJUR:** aplikasi web tidak dapat mengunci HP di level sistem operasi — hanya
+aplikasi Android/iOS native (kiosk / screen pinning) yang bisa. Layar penuh berfungsi di
+Android Chrome; iPhone/Safari tidak mendukung Fullscreen API, namun deteksi keluar aplikasi
+tetap berjalan di semua perangkat.
+
+- **Layar gerbang** sebelum ujian (`lockdown-gate`) berisi aturan + tombol "Saya Mengerti,
+  Mulai Ujian" (dibutuhkan karena permintaan layar penuh wajib dari gestur pengguna).
+- **Hook `useExamLockdown`**: paksa fullscreen, Screen Wake Lock (layar tetap menyala),
+  kunci orientasi, blokir klik-kanan/copy/cut/paste, blokir F12 & Ctrl+Shift+I/J/C &
+  Ctrl+T/N/W/P/S/U/O, peringatan `beforeunload`, serta deteksi `visibilitychange`,
+  `blur`, dan `fullscreenchange`.
+- **Overlay penghalang** tiap pelanggaran menampilkan alasan + hitungan `n/N` + sisa
+  kesempatan, dan tombol "Lanjutkan Ujian" yang mengembalikan layar penuh.
+- **Backend**: `GET/PUT /api/settings/exam-lock` (siswa boleh baca, admin/guru ubah,
+  N di-clamp 1–20), `POST /api/exam/violation` mencatat `{type,label,at}` ke attempt dan
+  **memanggil `finalize_attempt()` otomatis** saat batas tercapai (`auto_submitted_reason`
+  = "pelanggaran"). `/api/exam/start` kini mengirim `lock` + jumlah pelanggaran berjalan.
+- **Untuk guru**: kolom "Pelanggaran" (badge merah, tanda `auto`) di tabel Hasil & Koreksi,
+  rincian waktu tiap pelanggaran di halaman Koreksi, kolom "Pelanggaran" di sheet
+  `Rekap Nilai`, dan sheet ke-4 **`Pelanggaran`** (Nama, NISN, pelanggaran ke-, jenis,
+  waktu, dikumpulkan otomatis, status ujian) yang juga memuat attempt yang **masih
+  berlangsung** agar kecurangan terlihat saat ujian sedang jalan.
+- **Pengaturan**: bagian "Mode Ujian Ketat" di Pengaturan Sekolah (saklar aktif/nonaktif +
+  batas pelanggaran, default 3) berikut catatan batasan perangkat.
+- Layar ujian sudah responsif untuk HP (header ringkas, palet soal berupa dialog, tombol
+  besar). Verified: 10/10 pytest `test_iteration15.py`, total suite **162 passed, 2 skipped**,
+  serta E2E UI di viewport HP: gerbang → ujian → pelanggaran 1/3 → 2/3 → kumpul otomatis
+  dan guru melihat catatannya.

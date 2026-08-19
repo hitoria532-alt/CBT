@@ -77,8 +77,22 @@ function App() {
               <Route path="kelas" element={<Classes />} />
               <Route path="hasil" element={<Results />} />
               <Route path="peringkat" element={<Leaderboard />} />
-              <Route path="pengaturan" element={<SchoolSettings />} />
-              <Route path="akun" element={<Accounts />} />
+              <Route
+                path="pengaturan"
+                element={
+                  <Protected roles={["admin"]}>
+                    <SchoolSettings />
+                  </Protected>
+                }
+              />
+              <Route
+                path="akun"
+                element={
+                  <Protected roles={["admin"]}>
+                    <Accounts />
+                  </Protected>
+                }
+              />
             </Route>
 
             {/* Student */}

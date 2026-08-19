@@ -179,7 +179,7 @@ class TestAnalyticsClasses:
 # ============================================================================
 # 3. SOAL GAMBAR MASSAL - import with image_url column
 # ============================================================================
-GOOD_IMG = "https://httpbin.org/image/png"
+GOOD_IMG = "https://images.unsplash.com/photo-1509228468518-180dd4864904?w=320&fm=jpg"
 BAD_IMG = "https://example.com/definitely-does-not-exist-xyz-9x9.png"
 
 

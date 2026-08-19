@@ -2,8 +2,12 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 import { toast } from "sonner";
-import { Clock, ChevronLeft, ChevronRight, Send, LayoutGrid } from "lucide-react";
+import {
+  Clock, ChevronLeft, ChevronRight, Send, LayoutGrid, ShieldAlert, ShieldCheck,
+  Lock, Smartphone, Maximize,
+} from "lucide-react";
 import api, { apiError, fileUrl } from "../../lib/api";
+import useExamLockdown from "../../hooks/useExamLockdown";
 import { Button } from "../../components/ui/button";
 import { Textarea } from "../../components/ui/textarea";
 import {
@@ -30,6 +34,7 @@ export default function ExamView() {
   const [remaining, setRemaining] = useState(0);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [showPalette, setShowPalette] = useState(false);
+  const [armed, setArmed] = useState(false);   // student accepted the lockdown rules
   const submittedRef = useRef(false);
 
   useEffect(() => {
@@ -58,17 +63,41 @@ export default function ExamView() {
     } catch (e) { toast.error(apiError(e)); submittedRef.current = false; }
   }, [answers, sessionId, nav]);
 
+  const lockCfg = data?.lock || { enabled: true, max_violations: 3 };
+  const lockActive = Boolean(lockCfg.enabled) && armed && !loading && !submittedRef.current;
+
+  const onAutoSubmit = useCallback((n) => {
+    submittedRef.current = true;
+    toast.error(`Ujian dihentikan: ${n} kali keluar dari layar ujian. Jawaban dikumpulkan otomatis.`);
+    nav("/hasil", { replace: true });
+  }, [nav]);
+
+  const lock = useExamLockdown({
+    active: lockActive,
+    sessionId,
+    maxViolations: lockCfg.max_violations,
+    initialCount: data?.violations || 0,
+    onAutoSubmit,
+  });
+
+  const submitAndRelease = useCallback(async (auto = false) => {
+    lock.releaseLocks();
+    await doSubmit(auto);
+  }, [lock, doSubmit]);
+
+  const startExam = async () => { await lock.enterFullscreen(); setArmed(true); };
+
   // Timer
   useEffect(() => {
     if (loading) return;
     const t = setInterval(() => {
       setRemaining((prev) => {
-        if (prev <= 1) { clearInterval(t); doSubmit(true); return 0; }
+        if (prev <= 1) { clearInterval(t); submitAndRelease(true); return 0; }
         return prev - 1;
       });
     }, 1000);
     return () => clearInterval(t);
-  }, [loading, doSubmit]);
+  }, [loading, submitAndRelease]);
 
   // Autosave
   useEffect(() => {
@@ -79,6 +108,46 @@ export default function ExamView() {
 
   if (loading) {
     return <div className="min-h-screen flex items-center justify-center"><div className="h-8 w-8 rounded-full border-2 border-primary border-t-transparent animate-spin" /></div>;
+  }
+
+  if (lockCfg.enabled && !armed) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center p-4" data-testid="lockdown-gate">
+        <div className="w-full max-w-md bg-card border border-border rounded-xl p-6 sm:p-8">
+          <div className="h-12 w-12 rounded-xl bg-primary/10 text-primary flex items-center justify-center mb-5">
+            <Lock className="h-6 w-6" />
+          </div>
+          <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Mode Ujian Ketat</p>
+          <h1 className="font-heading text-2xl font-semibold tracking-tight mt-1 mb-2">{data.session.title}</h1>
+          <p className="text-sm text-muted-foreground leading-relaxed mb-5">
+            Ujian dijalankan dalam mode terkunci. Baca aturan berikut sebelum memulai.
+          </p>
+          <ul className="space-y-3 mb-6">
+            {[
+              [Maximize, "Layar ujian akan dibuat penuh dan layar HP dijaga tetap menyala."],
+              [ShieldAlert, `Setiap kali Anda pindah tab, keluar aplikasi, atau keluar layar penuh akan tercatat sebagai pelanggaran. Setelah ${lockCfg.max_violations} kali, jawaban dikumpulkan otomatis.`],
+              [Smartphone, "Jangan menekan tombol Home / Recent Apps. Menyalin teks dan klik kanan dinonaktifkan."],
+            ].map(([Icon, text], i) => (
+              <li key={i} className="flex gap-3 text-sm">
+                <Icon className="h-4 w-4 text-primary shrink-0 mt-0.5" />
+                <span className="text-muted-foreground leading-relaxed">{text}</span>
+              </li>
+            ))}
+          </ul>
+          {data.violations > 0 && (
+            <p className="text-xs text-destructive bg-destructive/10 rounded-md p-3 mb-4">
+              Anda sudah memiliki {data.violations} pelanggaran tercatat pada sesi ini.
+            </p>
+          )}
+          <Button onClick={startExam} className="w-full" data-testid="start-lockdown-btn">
+            <ShieldCheck className="h-4 w-4 mr-2" />Saya Mengerti, Mulai Ujian
+          </Button>
+          <button onClick={() => nav("/beranda")} className="w-full text-xs text-muted-foreground hover:text-foreground mt-3">
+            Kembali ke beranda
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const questions = data.questions;
@@ -100,6 +169,17 @@ export default function ExamView() {
             <p className="text-sm font-medium truncate">{data.session.title}</p>
             <p className="text-xs text-muted-foreground">{answered}/{questions.length} terjawab</p>
           </div>
+          {lockCfg.enabled && (
+            <div
+              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium ${lock.count > 0 ? "bg-destructive/10 text-destructive" : "bg-primary/10 text-primary"}`}
+              title="Mode ujian ketat aktif"
+              data-testid="lockdown-badge"
+            >
+              <ShieldCheck className="h-3.5 w-3.5" />
+              Ketat {lock.count}/{lockCfg.max_violations}
+            </div>
+          )}
+
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md font-mono text-lg tracking-widest ${critical ? "bg-destructive/10 text-destructive animate-pulse" : "bg-muted text-foreground"}`} data-testid="exam-timer">
             <Clock className="h-4 w-4" />{fmtTime(remaining)}
           </div>
@@ -196,10 +276,39 @@ export default function ExamView() {
           <p className="text-sm text-muted-foreground">Anda telah menjawab {answered} dari {questions.length} soal. Jawaban tidak dapat diubah setelah dikumpulkan.</p>
           <DialogFooter>
             <Button variant="outline" onClick={() => setConfirmOpen(false)}>Batal</Button>
-            <Button onClick={() => doSubmit(false)} data-testid="confirm-submit-btn">Ya, Kumpulkan</Button>
+            <Button onClick={() => submitAndRelease(false)} data-testid="confirm-submit-btn">Ya, Kumpulkan</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Lockdown warning overlay */}
+      {lock.blocked && (
+        <div className="fixed inset-0 z-50 bg-background flex items-center justify-center p-4" data-testid="lockdown-overlay">
+          <div className="w-full max-w-md text-center">
+            <div className="h-14 w-14 rounded-2xl bg-destructive/10 text-destructive flex items-center justify-center mx-auto mb-5">
+              <ShieldAlert className="h-7 w-7" />
+            </div>
+            <h2 className="font-heading text-2xl font-semibold tracking-tight mb-2">Peringatan Pelanggaran</h2>
+            <p className="text-sm text-muted-foreground leading-relaxed mb-4">{lock.lastReason}</p>
+            <div className="bg-destructive/10 text-destructive rounded-md p-4 mb-6">
+              <p className="font-heading text-3xl font-bold" data-testid="violation-count">
+                {lock.count} / {lockCfg.max_violations}
+              </p>
+              <p className="text-xs mt-1">
+                {lock.count >= lockCfg.max_violations
+                  ? "Batas pelanggaran tercapai — jawaban dikumpulkan otomatis."
+                  : `Sisa ${lockCfg.max_violations - lock.count} kesempatan sebelum jawaban dikumpulkan otomatis.`}
+              </p>
+            </div>
+            <p className="text-xs text-muted-foreground mb-5">
+              Pelanggaran ini tercatat dan dapat dilihat oleh guru Anda.
+            </p>
+            <Button onClick={lock.resume} className="w-full" data-testid="resume-exam-btn">
+              <ShieldCheck className="h-4 w-4 mr-2" />Lanjutkan Ujian
+            </Button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

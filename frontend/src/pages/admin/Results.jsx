@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet, ShieldAlert } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -22,6 +22,7 @@ export default function Results() {
   const [analytics, setAnalytics] = useState(null);
   const [thresholdOpen, setThresholdOpen] = useState(false);
   const [thForm, setThForm] = useState({ easy_min: 70, medium_min: 40 });
+  const [exporting, setExporting] = useState(false);
 
   useEffect(() => { api.get("/sessions").then((r) => setSessions(r.data)); }, []);
 
@@ -60,6 +61,21 @@ export default function Results() {
     a.href = url; a.download = `hasil-${active.title}.csv`; a.click();
   };
 
+  const exportExcel = async () => {
+    setExporting(true);
+    try {
+      const res = await api.get(`/export/session/${active.id}/xlsx`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const el = document.createElement("a");
+      el.href = url;
+      el.download = `hasil-${active.title.replace(/\s+/g, "_")}.xlsx`;
+      el.click();
+      URL.revokeObjectURL(url);
+      toast.success("Rekap nilai Excel terunduh");
+    } catch (e) { toast.error(apiError(e)); }
+    finally { setExporting(false); }
+  };
+
   const downloadPdf = async (attemptId) => {
     const res = await api.get(`/results/detail/${attemptId}/pdf`, { responseType: "blob" });
     const url = URL.createObjectURL(res.data);
@@ -95,6 +111,23 @@ export default function Results() {
         </button>
         <h1 className="font-heading text-2xl font-semibold mb-1">Koreksi: {grading.student_name}</h1>
         <p className="text-muted-foreground mb-6">{grading.session_title}</p>
+
+        {grading.violations?.length > 0 && (
+          <div className="mb-6 rounded-md border border-destructive/30 bg-destructive/5 p-4" data-testid="violation-log">
+            <div className="flex items-center gap-2 text-sm font-medium text-destructive mb-2">
+              <ShieldAlert className="h-4 w-4" />
+              {grading.violations.length} pelanggaran mode ujian ketat
+              {grading.auto_submitted_reason === "pelanggaran" && " · jawaban dikumpulkan otomatis"}
+            </div>
+            <ul className="text-xs text-muted-foreground space-y-1">
+              {grading.violations.map((v, i) => (
+                <li key={i}>
+                  <b>{i + 1}.</b> {v.label || v.type} — {fmtDateTime(v.at)}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
 
         <div className="space-y-4">
           {grading.details.map((d, i) => (
@@ -220,7 +253,10 @@ export default function Results() {
           </div>
           <div className="flex gap-2">
             <Button variant="outline" onClick={openAnalytics} data-testid="analytics-btn"><BarChart3 className="h-4 w-4 mr-2" />Analitik Butir</Button>
-            <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+            <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length} data-testid="export-csv-btn"><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+            <Button onClick={exportExcel} disabled={exporting || !data.attempts.length} data-testid="export-excel-btn">
+              <FileSpreadsheet className="h-4 w-4 mr-2" />{exporting ? "Menyiapkan..." : "Ekspor Excel"}
+            </Button>
           </div>
         </div>
         <div className="bg-card border border-border rounded-md overflow-hidden">
@@ -231,6 +267,7 @@ export default function Results() {
                 <TableHead>NISN/NIP</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead>Nilai</TableHead>
+                <TableHead>Pelanggaran</TableHead>
                 <TableHead>Kumpul</TableHead>
                 <TableHead className="text-right">Aksi</TableHead>
               </TableRow>
@@ -242,6 +279,21 @@ export default function Results() {
                   <TableCell className="text-muted-foreground">{a.student_identifier || "-"}</TableCell>
                   <TableCell><Badge variant="outline">{STATUS_LABEL[a.status] || a.status}</Badge></TableCell>
                   <TableCell className="font-semibold">{a.score != null ? a.score : "—"}</TableCell>
+                  <TableCell data-testid={`violations-${a.id}`}>
+                    {a.violations?.length ? (
+                      <Badge
+                        className="bg-destructive/10 text-destructive border-0"
+                        title={a.auto_submitted_reason === "pelanggaran"
+                          ? "Dikumpulkan otomatis karena melewati batas pelanggaran"
+                          : "Keluar dari layar ujian"}
+                      >
+                        <ShieldAlert className="h-3 w-3 mr-1" />{a.violations.length}
+                        {a.auto_submitted_reason === "pelanggaran" && " · auto"}
+                      </Badge>
+                    ) : (
+                      <span className="text-muted-foreground text-sm">—</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{fmtDateTime(a.submitted_at)}</TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="ghost" onClick={() => downloadPdf(a.id)} data-testid={`pdf-btn-${a.id}`} className="mr-1"><Download className="h-4 w-4" /></Button>
@@ -252,7 +304,7 @@ export default function Results() {
                 </TableRow>
               ))}
               {data.attempts.length === 0 && (
-                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground py-10">Belum ada peserta.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={7} className="text-center text-muted-foreground py-10">Belum ada peserta.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

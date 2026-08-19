@@ -15,7 +15,12 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { category_id: "", type: "pg", text: "", options: ["", "", "", ""], correct_answer: "0", weight: 1, image_path: null };
+const MAX_OPTIONS = 5;   // A - E
+const MIN_OPTIONS = 2;
+const blankOptions = () => Array(MAX_OPTIONS).fill("");
+const LETTER = (i) => String.fromCharCode(65 + i);
+
+const EMPTY = { category_id: "", type: "pg", text: "", options: blankOptions(), correct_answer: "0", weight: 1, image_path: null };
 
 export default function Questions() {
   const [items, setItems] = useState([]);
@@ -75,7 +80,7 @@ export default function Questions() {
     setEditing(q);
     setForm({
       category_id: q.category_id || "", type: q.type, text: q.text,
-      options: q.options?.length ? q.options : ["", "", "", ""],
+      options: q.options?.length ? q.options : blankOptions(),
       correct_answer: q.correct_answer ?? (q.type === "truefalse" ? "true" : "0"),
       weight: q.weight ?? 1,
       image_path: q.image_path || null,
@@ -86,20 +91,29 @@ export default function Questions() {
   const setType = (type) => {
     setForm((f) => ({
       ...f, type,
-      options: type === "pg" ? (f.options.length ? f.options : ["", "", "", ""]) : [],
+      options: type === "pg" ? (f.options.length ? f.options : blankOptions()) : [],
       correct_answer: type === "pg" ? "0" : type === "truefalse" ? "true" : null,
     }));
   };
 
   const save = async () => {
+    // keep A..E positions, only drop trailing empty options
+    let opts = form.type === "pg" ? form.options.map((o) => o.trim()) : [];
+    while (opts.length > 0 && opts[opts.length - 1] === "") opts.pop();
     const payload = {
       category_id: form.category_id || null, type: form.type, text: form.text,
-      options: form.type === "pg" ? form.options.filter((o) => o.trim() !== "" || true) : [],
+      options: opts,
       correct_answer: form.type === "essay" ? null : String(form.correct_answer),
       weight: Number(form.weight) || 1,
       image_path: form.image_path || null,
     };
     if (!payload.text.trim()) return toast.error("Teks soal wajib diisi");
+    if (form.type === "pg") {
+      const filled = opts.filter((o) => o !== "").length;
+      if (filled < MIN_OPTIONS) return toast.error(`Isi minimal ${MIN_OPTIONS} opsi jawaban`);
+      const key = Number(payload.correct_answer);
+      if (!opts[key]) return toast.error(`Kunci jawaban ${LETTER(key)} masih kosong`);
+    }
     try {
       if (editing) await api.put(`/questions/${editing.id}`, payload);
       else await api.post("/questions", payload);
@@ -115,6 +129,15 @@ export default function Questions() {
   const catName = (id) => cats.find((c) => c.id === id)?.name || "Umum";
   const shown = filter === "all" ? items : items.filter((q) => q.category_id === filter);
   const setOpt = (i, v) => setForm((f) => { const o = [...f.options]; o[i] = v; return { ...f, options: o }; });
+  const addOpt = () => setForm((f) => (f.options.length >= MAX_OPTIONS ? f : { ...f, options: [...f.options, ""] }));
+  const removeOpt = (i) => setForm((f) => {
+    if (f.options.length <= MIN_OPTIONS) return f;
+    const o = f.options.filter((_, idx) => idx !== i);
+    let key = Number(f.correct_answer);
+    if (key === i) key = 0;
+    else if (key > i) key -= 1;
+    return { ...f, options: o, correct_answer: String(key) };
+  });
 
   return (
     <div data-testid="questions-page">
@@ -227,16 +250,31 @@ export default function Questions() {
 
             {form.type === "pg" && (
               <div className="space-y-2">
-                <Label>Opsi Jawaban (pilih yang benar)</Label>
+                <div className="flex items-center justify-between">
+                  <Label>Opsi Jawaban A–E (pilih yang benar)</Label>
+                  <span className="text-xs text-muted-foreground">{form.options.length} opsi</span>
+                </div>
                 {form.options.map((o, i) => (
                   <div key={i} className="flex items-center gap-2">
                     <input type="radio" name="correct" checked={String(form.correct_answer) === String(i)}
                       onChange={() => setForm({ ...form, correct_answer: String(i) })}
                       className="accent-[hsl(var(--primary))] h-4 w-4" data-testid={`correct-opt-${i}`} />
-                    <span className="font-medium w-5">{String.fromCharCode(65 + i)}</span>
-                    <Input value={o} onChange={(e) => setOpt(i, e.target.value)} placeholder={`Opsi ${String.fromCharCode(65 + i)}`} data-testid={`option-input-${i}`} />
+                    <span className="font-medium w-5">{LETTER(i)}</span>
+                    <Input value={o} onChange={(e) => setOpt(i, e.target.value)} placeholder={`Opsi ${LETTER(i)}`} data-testid={`option-input-${i}`} />
+                    {form.options.length > MIN_OPTIONS && (
+                      <Button type="button" variant="ghost" size="icon" onClick={() => removeOpt(i)}
+                        title={`Hapus opsi ${LETTER(i)}`} data-testid={`remove-opt-${i}`}>
+                        <X className="h-4 w-4 text-muted-foreground" />
+                      </Button>
+                    )}
                   </div>
                 ))}
+                {form.options.length < MAX_OPTIONS && (
+                  <Button type="button" variant="outline" size="sm" onClick={addOpt} data-testid="add-option-btn">
+                    <Plus className="h-4 w-4 mr-1" />Tambah opsi {LETTER(form.options.length)}
+                  </Button>
+                )}
+                <p className="text-xs text-muted-foreground">Kosongkan opsi terakhir bila soal hanya butuh sedikit pilihan, atau hapus dengan tombol ✕.</p>
               </div>
             )}
 
@@ -278,11 +316,12 @@ export default function Questions() {
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground leading-relaxed">
               Unggah file <b>CSV</b> atau <b>Excel (.xlsx)</b> dengan kolom:
-              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, correct, weight, category, image_url</code>
+              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, option_e, correct, weight, category, image_url</code>
             </p>
             <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
               <li><b>type</b>: pg / truefalse / essay</li>
-              <li><b>correct</b>: untuk PG isi A/B/C/D · untuk B/S isi benar/salah</li>
+              <li><b>correct</b>: untuk PG isi A/B/C/D/E · untuk B/S isi benar/salah</li>
+              <li><b>option_e</b>: opsional — kosongkan bila soal hanya A–D</li>
               <li><b>category</b>: nama kategori (dibuat otomatis bila belum ada)</li>
               <li><b>image_url</b>: (opsional) tautan gambar soal, diunduh otomatis</li>
             </ul>

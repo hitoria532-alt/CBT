@@ -159,17 +159,9 @@ class TestPerPackageThresholds:
         assert item["percent_correct"] == 100.0
         assert item["difficulty"] == "Mudah"
 
-    def test_analytics_labels_90pct_as_sedang_when_thresholds_95_80(
-            self, admin_token, resources):
-        """Update the package to have easy_min=95, medium_min=80 already;
-        simulate: reduce easy_min so a 100% is 'Sedang'? Instead: set thresholds to 101/80,
-        which is invalid. Use a different approach: verify boundary logic by
-        temporarily setting easy_min=101 impossible - skip; the previous test already
-        proves labeling; here verify 100% would be 'Sedang' if easy_min > 100.
-        Simpler: just re-check that with 95/80, pct=100 -> Mudah (already covered).
-        This test asserts logic via updating thresholds to 200/80 not allowed
-        (server enforces 0-100)? Package endpoint doesn't validate range, so set
-        easy_min=101, then 100% -> Sedang."""
+    def test_out_of_range_thresholds_rejected(self, admin_token, resources):
+        """Server validates 0 <= medium_min < easy_min <= 100 (added in iteration 6),
+        so an out-of-range update must be rejected and the stored 95/80 kept."""
         h = H(admin_token)
         pkg = requests.get(f"{API}/packages/{resources['pkg_id']}",
                            headers=h, timeout=30).json()
@@ -181,16 +173,23 @@ class TestPerPackageThresholds:
         pkg_body["medium_min"] = 80
         r = requests.put(f"{API}/packages/{resources['pkg_id']}",
                          headers=h, json=pkg_body, timeout=30)
-        assert r.status_code == 200
+        assert r.status_code == 400, r.text
+        # thresholds unchanged -> still sourced from the package at 95/80
         an = requests.get(f"{API}/analytics/session/{resources['ses_id']}",
                           headers=h, timeout=30).json()
         assert an["thresholds"]["source"] == "paket"
+        assert an["thresholds"]["easy_min"] == 95
+        assert an["thresholds"]["medium_min"] == 80
         item = next(i for i in an["items"] if i["question_id"] == resources["q_id"])
         assert item["percent_correct"] == 100.0
-        assert item["difficulty"] == "Sedang", f"expected Sedang, got {item['difficulty']}"
+        assert item["difficulty"] == "Mudah"
 
     def test_null_thresholds_use_global(self, admin_token, resources):
         h = H(admin_token)
+        # pin the global thresholds so this test does not depend on run order
+        gr = requests.put(f"{API}/settings/difficulty", headers=h,
+                          json={"easy_min": 70, "medium_min": 40}, timeout=30)
+        assert gr.status_code == 200, gr.text
         pkg = requests.get(f"{API}/packages/{resources['pkg_id']}",
                            headers=h, timeout=30).json()
         pkg_body = {k: pkg[k] for k in ("title", "description", "category_id",
@@ -205,7 +204,6 @@ class TestPerPackageThresholds:
         an = requests.get(f"{API}/analytics/session/{resources['ses_id']}",
                           headers=h, timeout=30).json()
         assert an["thresholds"]["source"] == "global"
-        # global is 70/40 per prev iteration cleanup
         assert an["thresholds"]["easy_min"] == 70
         assert an["thresholds"]["medium_min"] == 40
 

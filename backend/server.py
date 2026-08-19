@@ -6,6 +6,7 @@ load_dotenv(ROOT_DIR / '.env')
 
 import os
 import io
+import re
 import hmac
 import logging
 import uuid
@@ -607,6 +608,8 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
         raise HTTPException(status_code=400, detail="Anda sudah mengerjakan sesi ini")
 
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
+    if not pkg:
+        raise HTTPException(status_code=400, detail="Paket soal untuk sesi ini sudah dihapus")
     questions = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in questions}
 
@@ -627,6 +630,7 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
             "package_id": session["package_id"], "answers": {}, "status": "berlangsung",
             "score": None, "started_at": now_iso(), "submitted_at": None,
             "needs_grading": False, "question_order": order_ids, "option_perm": option_perm,
+            "violations": [],
         }
         await db.attempts.insert_one(dict(attempt))
 
@@ -634,6 +638,7 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     option_perm = attempt.get("option_perm", {})
     display = [sanitize_question(qmap[qid], option_perm.get(qid)) for qid in order_ids if qid in qmap]
 
+    lock = await get_exam_lock()
     return {
         "attempt_id": attempt["id"],
         "session": {"id": session["id"], "title": session["title"],
@@ -641,7 +646,20 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
         "started_at": attempt["started_at"],
         "answers": attempt.get("answers", {}),
         "questions": display,
+        "lock": lock,
+        "violations": len(attempt.get("violations", [])),
     }
+
+
+def attempt_question_ids(attempt: dict, pkg: Optional[dict]) -> List[str]:
+    """Question ids for an attempt, falling back to the stored details/order when the
+    package was deleted after the exam was taken (keeps results/PDF working)."""
+    ids = list((pkg or {}).get("question_ids") or [])
+    if not ids:
+        ids = [d.get("question_id") for d in (attempt.get("details") or [])]
+    if not ids:
+        ids = list(attempt.get("question_order") or [])
+    return [i for i in ids if i]
 
 
 def compute_grade(pkg: dict, questions: dict, answers: dict, essay_scores: dict = None):
@@ -702,8 +720,10 @@ def compute_grade(pkg: dict, questions: dict, answers: dict, essay_scores: dict 
 
 async def finalize_attempt(attempt: dict, answers: dict) -> dict:
     """Convert shuffled indices, grade, and persist. Shared by submit + auto-submit."""
-    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
-    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0}) or {}
+    if not pkg.get("question_ids"):
+        pkg = {**pkg, "question_ids": attempt_question_ids(attempt, pkg)}
+    qlist = await db.questions.find({"id": {"$in": pkg["question_ids"]}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     perm_map = attempt.get("option_perm", {})
     canonical = {}
@@ -773,8 +793,9 @@ async def result_detail(attempt_id: str, user: dict = Depends(get_current_user))
         raise HTTPException(status_code=404, detail="Tidak ditemukan")
     if user["role"] == "siswa" and attempt["student_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Akses ditolak")
-    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
-    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0}) or {}
+    qlist = await db.questions.find({"id": {"$in": attempt_question_ids(attempt, pkg)}},
+                                    {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     session = await db.sessions.find_one({"id": attempt["session_id"]}, {"_id": 0})
     enriched = []
@@ -793,8 +814,10 @@ async def grade_essay(attempt_id: str, body: GradeEssayBody, user: dict = Depend
     attempt = await db.attempts.find_one({"id": attempt_id}, {"_id": 0})
     if not attempt:
         raise HTTPException(status_code=404, detail="Tidak ditemukan")
-    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
-    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0}) or {}
+    if not pkg.get("question_ids"):
+        pkg = {**pkg, "question_ids": attempt_question_ids(attempt, pkg)}
+    qlist = await db.questions.find({"id": {"$in": pkg["question_ids"]}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     details, needs_grading, score, earned, total = compute_grade(
         pkg, qmap, attempt.get("answers", {}), body.scores)
@@ -840,13 +863,322 @@ async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "gu
     return {"ok": True}
 
 
+# ------------------------------------------------------------------ STUDENT IMPORT (Excel)
+STUDENT_COLS = ["nama", "kelas", "nis", "username", "password"]
+STUDENT_COL_HELP = {
+    "nama": "Nama lengkap siswa. Wajib diisi.",
+    "kelas": "Nama kelas / rombel, contoh: Kelas X-A. Bila kelas belum ada akan dibuat otomatis. "
+             "Boleh dikosongkan bila siswa belum masuk kelas.",
+    "nis": "NIS / NISN siswa. Boleh dikosongkan.",
+    "username": "Username untuk login. Harus berupa alamat email karena kolom login memakai email. "
+                "Contoh: ani.siswa@sekolah.id",
+    "password": "Password awal login siswa. Minimal 5 karakter. Wajib diisi untuk siswa baru.",
+}
+STUDENT_SAMPLE = [
+    ["Ani Rahmawati", "Kelas X-A", "0051234561", "ani.rahmawati@sekolah.id", "siswa12345"],
+    ["Budi Santoso", "Kelas X-A", "0051234562", "budi.santoso@sekolah.id", "siswa12345"],
+    ["Citra Dewi", "Kelas X-B", "0051234563", "citra.dewi@sekolah.id", "siswa12345"],
+]
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+@api_router.get("/students/import-template")
+async def student_import_template(user: dict = Depends(require_roles("admin", "guru"))):
+    """A ready-to-fill, nicely formatted Excel workbook for bulk student import."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    classes = await db.classes.find({}, {"_id": 0, "name": 1}).to_list(1000)
+    class_names = sorted({c["name"] for c in classes})
+
+    thin = _xl_border()
+    wb = Workbook()
+
+    # ---------------------------------------------------------- Petunjuk
+    guide = wb.active
+    guide.title = "Petunjuk"
+    guide.sheet_view.showGridLines = False
+    guide.column_dimensions["A"].width = 4
+    guide.column_dimensions["B"].width = 22
+    guide.column_dimensions["C"].width = 92
+
+    r = 1
+    if school.get("name"):
+        guide.merge_cells(f"B{r}:C{r}")
+        c = guide.cell(row=r, column=2, value=school["name"].upper())
+        c.font = Font(bold=True, size=13, color=XL_GREEN)
+        r += 1
+    guide.merge_cells(f"B{r}:C{r}")
+    c = guide.cell(row=r, column=2, value="TEMPLATE IMPOR DATA SISWA")
+    c.font = Font(bold=True, size=15, color=XL_GREEN)
+    guide.row_dimensions[r].height = 22
+    r += 1
+    guide.merge_cells(f"B{r}:C{r}")
+    c = guide.cell(row=r, column=2, value="Isi lembar \"Data Siswa\", simpan sebagai .xlsx, lalu unggah pada menu Manajemen Kelas → Impor Siswa.")
+    c.font = Font(size=10, color="7A7A72")
+    r += 2
+
+    steps = [
+        "Buka lembar \"Data Siswa\" (tab di bawah).",
+        "Hapus 3 baris contoh berwarna abu-abu, lalu isi data siswa Anda mulai baris 4.",
+        "Satu baris = satu siswa. Jangan mengubah atau menghapus baris judul kolom.",
+        "Kolom username WAJIB berupa alamat email — itulah yang diketik siswa saat login.",
+        "Bila nama kelas belum terdaftar, kelas baru akan dibuat otomatis saat impor.",
+        "Bila username sudah terdaftar, data siswa akan diperbarui (bukan diduplikasi).",
+        "Simpan file (.xlsx atau .csv), lalu unggah lewat tombol \"Pilih File & Impor\".",
+    ]
+    guide.merge_cells(f"B{r}:C{r}")
+    c = guide.cell(row=r, column=2, value="LANGKAH PENGISIAN")
+    c.font = Font(bold=True, size=11, color="FFFFFF")
+    c.fill = PatternFill("solid", fgColor=XL_GREEN)
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    r += 1
+    for i, step in enumerate(steps, start=1):
+        num = guide.cell(row=r, column=2, value=f"Langkah {i}")
+        num.font = Font(size=10, bold=True, color=XL_GREEN)
+        num.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        num.border = thin
+        txt = guide.cell(row=r, column=3, value=step)
+        txt.font = Font(size=10)
+        txt.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+        txt.border = thin
+        guide.row_dimensions[r].height = 20
+        r += 1
+    r += 1
+
+    guide.merge_cells(f"B{r}:C{r}")
+    c = guide.cell(row=r, column=2, value="KETERANGAN KOLOM")
+    c.font = Font(bold=True, size=11, color="FFFFFF")
+    c.fill = PatternFill("solid", fgColor=XL_GREEN)
+    c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+    r += 1
+    for col in STUDENT_COLS:
+        head = guide.cell(row=r, column=2, value=col)
+        head.font = Font(size=10, bold=True, color=XL_GREEN)
+        head.fill = PatternFill("solid", fgColor=XL_GREEN_SOFT)
+        head.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+        head.border = thin
+        desc = guide.cell(row=r, column=3, value=STUDENT_COL_HELP[col])
+        desc.font = Font(size=10)
+        desc.alignment = Alignment(horizontal="left", vertical="center", wrap_text=True, indent=1)
+        desc.border = thin
+        guide.row_dimensions[r].height = 30
+        r += 1
+
+    if class_names:
+        r += 1
+        guide.merge_cells(f"B{r}:C{r}")
+        c = guide.cell(row=r, column=2, value="Kelas yang sudah terdaftar: " + " · ".join(class_names))
+        c.font = Font(size=9, italic=True, color="7A7A72")
+        c.alignment = Alignment(horizontal="left", vertical="center", indent=1)
+
+    # ---------------------------------------------------------- Data Siswa
+    ws = wb.create_sheet("Data Siswa")
+    ws.sheet_view.showGridLines = False
+    ncol = len(STUDENT_COLS)
+    last = get_column_letter(ncol)
+
+    ws.merge_cells(f"A1:{last}1")
+    c = ws.cell(row=1, column=1, value="DATA SISWA — ISI MULAI BARIS 4")
+    c.font = Font(bold=True, size=13, color=XL_GREEN)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 22
+
+    ws.merge_cells(f"A2:{last}2")
+    c = ws.cell(row=2, column=1, value="Baris abu-abu di bawah hanya contoh — silakan hapus sebelum mengunggah. username harus berupa email.")
+    c.font = Font(size=9, italic=True, color="9A9A92")
+    c.alignment = Alignment(horizontal="center", vertical="center")
+
+    labels = {"nama": "nama", "kelas": "kelas", "nis": "nis",
+              "username": "username", "password": "password"}
+    for i, col in enumerate(STUDENT_COLS, start=1):
+        cell = ws.cell(row=3, column=i, value=labels[col])
+        cell.font = Font(bold=True, color="FFFFFF", size=11)
+        cell.fill = PatternFill("solid", fgColor=XL_GREEN)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin
+        cell.comment = _xl_comment(STUDENT_COL_HELP[col])
+    ws.row_dimensions[3].height = 26
+
+    for ri, row in enumerate(STUDENT_SAMPLE, start=4):
+        for ci, v in enumerate(row, start=1):
+            cell = ws.cell(row=ri, column=ci, value=v)
+            cell.font = Font(size=10, italic=True, color="9A9A92")
+            cell.fill = PatternFill("solid", fgColor=XL_STRIPE)
+            cell.border = thin
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+            if ci == 3:
+                cell.number_format = "@"  # keep leading zeros of NIS
+
+    # empty, pre-formatted rows so the sheet stays tidy while typing
+    for ri in range(4 + len(STUDENT_SAMPLE), 4 + len(STUDENT_SAMPLE) + 40):
+        for ci in range(1, ncol + 1):
+            cell = ws.cell(row=ri, column=ci)
+            cell.border = thin
+            cell.font = Font(size=10)
+            cell.alignment = Alignment(horizontal="left", vertical="center")
+            if ci == 3:
+                cell.number_format = "@"
+
+    if class_names:
+        dv = DataValidation(type="list", formula1='"' + ",".join(class_names)[:250] + '"',
+                            allow_blank=True, showDropDown=False)
+        dv.prompt = "Pilih kelas yang ada atau tulis nama kelas baru"
+        dv.promptTitle = "Kelas"
+        dv.error = "Kelas belum terdaftar — tetap boleh diisi, kelas baru akan dibuat otomatis."
+        dv.errorStyle = "warning"
+        ws.add_data_validation(dv)
+        dv.add(f"B4:B{4 + len(STUDENT_SAMPLE) + 39}")
+
+    for col, w in zip("ABCDE", [30, 18, 18, 34, 18]):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = "A4"
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = "3:3"
+
+    wb.active = wb.index(ws)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": "attachment; filename=template_data_siswa.xlsx"})
+
+
+@api_router.post("/students/import")
+async def import_students(file: UploadFile = File(...), user: dict = Depends(require_roles("admin"))):
+    """Bulk-create student accounts from Excel/CSV and place them into classes."""
+    raw = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith((".xlsx", ".xls")):
+            df = pd.read_excel(io.BytesIO(raw), dtype=str, sheet_name="Data Siswa", header=2)
+        else:
+            df = pd.read_csv(io.BytesIO(raw), dtype=str)
+    except ValueError:
+        # workbook without the expected sheet name -> fall back to the first sheet
+        try:
+            df = pd.read_excel(io.BytesIO(raw), dtype=str)
+        except Exception as e:
+            raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    aliases = {"nama siswa": "nama", "name": "nama", "email": "username",
+               "user name": "username", "nisn": "nis", "nis/nisn": "nis",
+               "nisn/nis": "nis", "kata sandi": "password", "sandi": "password",
+               "rombel": "kelas", "kelas/rombel": "kelas"}
+    df.rename(columns=aliases, inplace=True)
+    if "nama" not in df.columns or "username" not in df.columns:
+        raise HTTPException(
+            status_code=400,
+            detail="Kolom wajib tidak ditemukan. Pastikan ada kolom 'nama' dan 'username'. "
+                   "Unduh template untuk format yang benar.")
+
+    def cell(row, key):
+        v = row.get(key, "")
+        if v is None:
+            return ""
+        v = str(v).strip()
+        return "" if v.lower() in ("nan", "none") else v
+
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    class_by_name = {c["name"].strip().lower(): c for c in classes}
+    class_members = {c["id"]: set(c.get("student_ids", [])) for c in classes}
+    created_classes, touched_classes = [], set()
+    created = updated = 0
+    errors = []
+    seen_emails = set()
+
+    for i, row in df.iterrows():
+        rownum = i + 4 if name.endswith((".xlsx", ".xls")) else i + 2
+        nama = cell(row, "nama")
+        username = cell(row, "username").lower()
+        password = cell(row, "password")
+        nis = cell(row, "nis")
+        kelas = cell(row, "kelas")
+        if not (nama or username or password or nis or kelas):
+            continue  # blank row
+        if not nama:
+            errors.append(f"Baris {rownum}: nama wajib diisi")
+            continue
+        if not username:
+            errors.append(f"Baris {rownum}: username (email) wajib diisi")
+            continue
+        if not EMAIL_RE.match(username):
+            errors.append(f"Baris {rownum}: username '{username}' harus berupa email, contoh nama@sekolah.id")
+            continue
+        if username in seen_emails:
+            errors.append(f"Baris {rownum}: username '{username}' dobel di dalam file")
+            continue
+        seen_emails.add(username)
+
+        existing = await db.users.find_one({"email": username})
+        if existing is not None and existing.get("role") != "siswa":
+            errors.append(f"Baris {rownum}: '{username}' sudah dipakai akun {existing.get('role')}")
+            continue
+        if existing is None and len(password) < 5:
+            errors.append(f"Baris {rownum}: password minimal 5 karakter")
+            continue
+
+        if existing is None:
+            doc = {"email": username, "password_hash": hash_password(password),
+                   "name": nama, "role": "siswa", "identifier": nis,
+                   "created_at": now_iso()}
+            res = await db.users.insert_one(doc)
+            sid = str(res.inserted_id)
+            created += 1
+        else:
+            sid = str(existing["_id"])
+            upd = {"name": nama, "identifier": nis or existing.get("identifier", "")}
+            if password:
+                if len(password) < 5:
+                    errors.append(f"Baris {rownum}: password minimal 5 karakter, password lama dipertahankan")
+                else:
+                    upd["password_hash"] = hash_password(password)
+            await db.users.update_one({"_id": existing["_id"]}, {"$set": upd})
+            updated += 1
+
+        if kelas:
+            key = kelas.strip().lower()
+            cls = class_by_name.get(key)
+            if cls is None:
+                cls = SchoolClass(name=kelas.strip(), description="Dibuat dari impor siswa").model_dump()
+                await db.classes.insert_one(dict(cls))
+                class_by_name[key] = cls
+                class_members[cls["id"]] = set()
+                created_classes.append(cls["name"])
+            class_members[cls["id"]].add(sid)
+            touched_classes.add(cls["id"])
+
+    added_to_class = 0
+    for cid in touched_classes:
+        members = sorted(class_members[cid])
+        before = len(next((c.get("student_ids", []) for c in classes if c["id"] == cid), []))
+        await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+        added_to_class += max(0, len(members) - before)
+
+    return {"created": created, "updated": updated,
+            "classes_created": created_classes,
+            "added_to_class": added_to_class,
+            "errors": errors}
+
+
+
 # ------------------------------------------------------------------ QUESTION IMPORT
 IMPORT_TEMPLATE = (
-    "type,text,option_a,option_b,option_c,option_d,correct,weight,category,image_url\n"
-    "pg,Berapa hasil 5 + 3?,6,7,8,9,C,1,Matematika,\n"
-    "truefalse,Matahari terbit dari timur.,,,,,benar,1,IPA,\n"
-    "essay,Jelaskan proses fotosintesis.,,,,,,2,IPA,\n"
-    "pg,Perhatikan gambar berikut.,A,B,C,D,A,1,IPA,https://contoh.com/gambar.png\n"
+    "type,text,option_a,option_b,option_c,option_d,option_e,correct,weight,category,image_url\n"
+    "pg,Berapa hasil 5 + 3?,6,7,8,9,10,C,1,Matematika,\n"
+    "pg,Ibu kota Provinsi Jawa Barat adalah ...,Bogor,Bandung,Bekasi,Cimahi,Depok,B,1,IPS,\n"
+    "truefalse,Matahari terbit dari timur.,,,,,,benar,1,IPA,\n"
+    "essay,Jelaskan proses fotosintesis.,,,,,,,2,IPA,\n"
+    "pg,Perhatikan gambar berikut.,A,B,C,D,E,A,1,IPA,https://contoh.com/gambar.png\n"
 )
 
 
@@ -877,7 +1209,7 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
 
     imported = 0
     errors = []
-    letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3"}
+    letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3", "e": "4"}
     for i, row in df.iterrows():
         rownum = i + 2
         try:
@@ -907,11 +1239,16 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
 
             options, correct = [], None
             if qtype == "pg":
-                for col in ("option_a", "option_b", "option_c", "option_d"):
+                slots = []
+                for col in ("option_a", "option_b", "option_c", "option_d", "option_e"):
                     v = row.get(col, "")
                     v = "" if (v is None or str(v).lower() == "nan") else str(v).strip()
-                    if v:
-                        options.append(v)
+                    slots.append(v)
+                # keep A..E positions intact (only drop trailing empty slots) so the
+                # answer key letter always points at the right option
+                while slots and slots[-1] == "":
+                    slots.pop()
+                options = slots
                 raw_c = str(row.get("correct", "")).strip().lower()
                 if raw_c in letter_idx:
                     correct = letter_idx[raw_c]
@@ -919,6 +1256,9 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
                     correct = raw_c
                 else:
                     errors.append(f"Baris {rownum}: kunci PG tidak valid")
+                    continue
+                if int(correct) >= len(options) or not options[int(correct)]:
+                    errors.append(f"Baris {rownum}: kunci PG menunjuk opsi yang kosong")
                     continue
             elif qtype == "truefalse":
                 raw_c = str(row.get("correct", "")).strip().lower()
@@ -955,8 +1295,9 @@ async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
     if user["role"] == "siswa" and attempt["student_id"] != user["id"]:
         raise HTTPException(status_code=403, detail="Akses ditolak")
 
-    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0})
-    qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
+    pkg = await db.packages.find_one({"id": attempt["package_id"]}, {"_id": 0}) or {}
+    qlist = await db.questions.find({"id": {"$in": attempt_question_ids(attempt, pkg)}},
+                                    {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     session = await db.sessions.find_one({"id": attempt["session_id"]}, {"_id": 0})
     kkm = session.get("kkm", 75) if session else 75
@@ -1344,6 +1685,8 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
     if not session:
         raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
+    if not pkg:
+        raise HTTPException(status_code=400, detail="Paket soal untuk sesi ini sudah dihapus")
     qlist = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in qlist}
     settings = await db.settings.find_one({"key": "difficulty"}, {"_id": 0})
@@ -1393,6 +1736,505 @@ async def analytics_session(session_id: str, user: dict = Depends(require_roles(
         })
     return {"session_title": session["title"], "participants": len(attempts),
             "items": items, "thresholds": {"easy_min": easy_min, "medium_min": medium_min, "source": source}}
+
+
+# ------------------------------------------------------------------ SESSION RESULT EXPORT (Excel)
+STATUS_ID = {"selesai": "Selesai", "menunggu_koreksi": "Menunggu Koreksi",
+             "berlangsung": "Berlangsung"}
+QTYPE_ID = {"pg": "Pilihan Ganda", "truefalse": "Benar/Salah", "essay": "Esai"}
+MONTH_ID = ["", "Jan", "Feb", "Mar", "Apr", "Mei", "Jun",
+            "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def fmt_dt_id(iso: Optional[str]) -> str:
+    """'19 Agu 2026, 14.58' — readable Indonesian date/time for spreadsheets."""
+    if not iso:
+        return "-"
+    try:
+        dt = datetime.fromisoformat(iso)
+    except (ValueError, TypeError):
+        return "-"
+    return f"{dt.day} {MONTH_ID[dt.month]} {dt.year}, {dt:%H.%M}"
+
+
+def _xl_comment(text: str):
+    from openpyxl.comments import Comment
+    c = Comment(text, "CBT Ujian")
+    c.width = 340
+    c.height = 110
+    return c
+
+
+XL_GREEN = "1E3A30"
+XL_GREEN_SOFT = "E8EDEA"
+XL_TERRA = "C0563F"
+XL_TERRA_SOFT = "FBEAE5"
+XL_STRIPE = "F6F6F0"
+XL_LINE = "D9D9CF"
+XL_GOLD_SOFT = "FDF3D8"
+
+
+def _xl_border(color=XL_LINE):
+    from openpyxl.styles import Border, Side
+    side = Side(style="thin", color=color)
+    return Border(left=side, right=side, top=side, bottom=side)
+
+
+def _predikat(score: Optional[float]) -> str:
+    if score is None:
+        return "-"
+    if score >= 90:
+        return "A"
+    if score >= 80:
+        return "B"
+    if score >= 70:
+        return "C"
+    if score >= 60:
+        return "D"
+    return "E"
+
+
+@api_router.get("/export/session/{session_id}/xlsx")
+async def export_session_results(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """A polished, print-ready workbook of a session's results.
+
+    Sheet 1 "Rekap Nilai"    - school letterhead, session info, per-student scores + summary
+    Sheet 2 "Rincian Jawaban" - point matrix (students x questions)
+    Sheet 3 "Analisis Butir"  - per-question difficulty analysis
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.page import PageMargins
+
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0}) or {}
+    cat = await db.categories.find_one({"id": pkg.get("category_id")}, {"_id": 0}) or {}
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    attempts = await db.attempts.find(
+        {"session_id": session_id, "status": {"$ne": "berlangsung"}}, {"_id": 0}
+    ).to_list(5000)
+    attempts.sort(key=lambda a: (a.get("student_name") or "").lower())
+
+    q_ids = list(pkg.get("question_ids") or [])
+    if not q_ids and attempts:
+        q_ids = [d.get("question_id") for d in (attempts[0].get("details") or [])]
+    qlist = await db.questions.find({"id": {"$in": q_ids}}, {"_id": 0}).to_list(2000)
+    qmap = {q["id"]: q for q in qlist}
+
+    # class name per student
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    cls_of = {}
+    for c in classes:
+        for sid in c.get("student_ids", []):
+            cls_of.setdefault(sid, []).append(c["name"])
+
+    kkm = float(session.get("kkm", 75) or 75)
+    weighted = pkg.get("scoring_method") == "weighted"
+    thin = _xl_border()
+
+    wb = Workbook()
+
+    # ============================================================ SHEET 1
+    ws = wb.active
+    ws.title = "Rekap Nilai"
+    headers = ["No", "Nama Siswa", "NISN/NIP", "Kelas", "Status", "Benar", "Salah",
+               "Kosong", "Poin", "Nilai", "Predikat", "Keterangan", "Pelanggaran",
+               "Waktu Kumpul"]
+    ncol = len(headers)
+    last_col = get_column_letter(ncol)
+
+    def band(row, text, *, size=11, bold=True, color=XL_GREEN, height=None, italic=False):
+        ws.merge_cells(f"A{row}:{last_col}{row}")
+        c = ws.cell(row=row, column=1, value=text)
+        c.font = Font(bold=bold, size=size, color=color, italic=italic)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        if height:
+            ws.row_dimensions[row].height = height
+        return c
+
+    r = 1
+    if school.get("name"):
+        band(r, school["name"].upper(), size=14, height=20); r += 1
+    if school.get("address"):
+        band(r, school["address"], size=9, bold=False, color="7A7A72"); r += 1
+    band(r, "REKAP NILAI HASIL UJIAN", size=13, height=22); r += 1
+    band(r, session["title"], size=11, bold=False, color="7A7A72"); r += 1
+    r += 1
+
+    # session info block (2 label/value pairs per row)
+    info = [
+        ("Paket Soal", pkg.get("title", "-")),
+        ("Mata Pelajaran", cat.get("name", "Umum")),
+        ("Jumlah Soal", len(q_ids)),
+        ("Metode Penilaian", "Berbobot" if weighted else "Persentase"),
+        ("Durasi", f"{session.get('duration_minutes', 0)} menit"),
+        ("KKM", kkm),
+        ("Mulai", fmt_dt_id(session.get("start_time"))),
+        ("Selesai", fmt_dt_id(session.get("end_time"))),
+    ]
+    info_start = r
+    for i in range(0, len(info), 2):
+        for j, (label, value) in enumerate(info[i:i + 2]):
+            lc = 1 + j * 7
+            lab = ws.cell(row=r, column=lc, value=label)
+            lab.font = Font(size=9, color="7A7A72", bold=True)
+            ws.merge_cells(start_row=r, start_column=lc + 1, end_row=r, end_column=lc + 5)
+            val = ws.cell(row=r, column=lc + 1, value=value)
+            val.font = Font(size=9)
+            val.alignment = Alignment(horizontal="left", vertical="center")
+        r += 1
+    ws.cell(row=info_start, column=1)
+    r += 1
+
+    head_row = r
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=head_row, column=i, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = PatternFill("solid", fgColor=XL_GREEN)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = thin
+    ws.row_dimensions[head_row].height = 30
+
+    scores, rows_written = [], 0
+    for idx, a in enumerate(attempts, start=1):
+        details = a.get("details") or []
+        benar = sum(1 for d in details if d.get("is_correct") is True)
+        salah = sum(1 for d in details if d.get("is_correct") is False)
+        kosong = sum(1 for d in details if d.get("answer") in (None, ""))
+        sc = a.get("score")
+        rr = head_row + idx
+        vals = [
+            idx, a.get("student_name", "-"), a.get("student_identifier") or "-",
+            ", ".join(cls_of.get(a.get("student_id"), [])) or "-",
+            STATUS_ID.get(a.get("status"), a.get("status", "-")),
+            benar, salah, kosong,
+            f"{a.get('earned', 0)}/{a.get('total_possible', 0)}",
+            sc if sc is not None else "-",
+            _predikat(sc),
+            ("Lulus" if sc >= kkm else "Belum Lulus") if sc is not None else "Menunggu",
+            len(a.get("violations") or []),
+            fmt_dt_id(a.get("submitted_at")),
+        ]
+        for ci, v in enumerate(vals, start=1):
+            c = ws.cell(row=rr, column=ci, value=v)
+            c.border = thin
+            c.font = Font(size=10, bold=ci in (2, 10))
+            c.alignment = Alignment(
+                horizontal="left" if ci in (2, 3, 4) else "center", vertical="center")
+            if idx % 2 == 0:
+                c.fill = PatternFill("solid", fgColor=XL_STRIPE)
+        nviol = len(a.get("violations") or [])
+        if nviol:
+            vc = ws.cell(row=rr, column=13)
+            vc.fill = PatternFill("solid", fgColor=XL_TERRA_SOFT)
+            vc.font = Font(size=10, bold=True, color=XL_TERRA)
+        if sc is not None:
+            ws.cell(row=rr, column=10).number_format = "0.00"
+            below = sc < kkm
+            for ci in (10, 11, 12):
+                cc = ws.cell(row=rr, column=ci)
+                cc.fill = PatternFill("solid", fgColor=XL_TERRA_SOFT if below else XL_GREEN_SOFT)
+                cc.font = Font(size=10, bold=True, color=XL_TERRA if below else XL_GREEN)
+            scores.append(sc)
+        rows_written += 1
+
+    if rows_written == 0:
+        rr = head_row + 1
+        ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=ncol)
+        c = ws.cell(row=rr, column=1, value="Belum ada peserta yang mengumpulkan.")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.font = Font(size=10, italic=True, color="7A7A72")
+        c.border = thin
+        rows_written = 1
+
+    # summary block
+    sr = head_row + rows_written + 2
+    ws.merge_cells(start_row=sr, start_column=1, end_row=sr, end_column=ncol)
+    t = ws.cell(row=sr, column=1, value="RINGKASAN")
+    t.font = Font(bold=True, size=10, color="FFFFFF")
+    t.fill = PatternFill("solid", fgColor=XL_GREEN)
+    t.alignment = Alignment(horizontal="center", vertical="center")
+
+    lulus = sum(1 for x in scores if x >= kkm)
+    summary = [
+        ("Jumlah Peserta", len(attempts)),
+        ("Sudah Dinilai", len(scores)),
+        ("Rata-rata Nilai", round(sum(scores) / len(scores), 2) if scores else "-"),
+        ("Nilai Tertinggi", max(scores) if scores else "-"),
+        ("Nilai Terendah", min(scores) if scores else "-"),
+        ("Jumlah Lulus", lulus),
+        ("Belum Lulus", len(scores) - lulus),
+        ("Ketuntasan", f"{round(lulus / len(scores) * 100, 1)}%" if scores else "-"),
+    ]
+    row = sr + 1
+    for i in range(0, len(summary), 2):
+        for j, (label, value) in enumerate(summary[i:i + 2]):
+            lc = 1 + j * 7
+            ws.merge_cells(start_row=row, start_column=lc, end_row=row, end_column=lc + 2)
+            lab = ws.cell(row=row, column=lc, value=label)
+            lab.font = Font(size=10, color="7A7A72", bold=True)
+            lab.alignment = Alignment(horizontal="left", vertical="center")
+            lab.border = thin
+            ws.merge_cells(start_row=row, start_column=lc + 3, end_row=row, end_column=lc + 5)
+            val = ws.cell(row=row, column=lc + 3, value=value)
+            val.font = Font(size=10, bold=True, color=XL_GREEN)
+            val.alignment = Alignment(horizontal="center", vertical="center")
+            val.fill = PatternFill("solid", fgColor=XL_GREEN_SOFT)
+            val.border = thin
+        row += 1
+
+    row += 1
+    ws.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncol)
+    note = ws.cell(row=row, column=1, value=(
+        f"Predikat: A ≥ 90 · B ≥ 80 · C ≥ 70 · D ≥ 60 · E < 60   |   "
+        f"Dicetak {fmt_dt_id(now_iso())}"))
+    note.font = Font(size=8, italic=True, color="9A9A92")
+    note.alignment = Alignment(horizontal="center")
+
+    widths = [5, 28, 15, 14, 16, 8, 8, 9, 11, 9, 10, 14, 12, 20]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = ws.cell(row=head_row + 1, column=1)
+    ws.auto_filter.ref = f"A{head_row}:{last_col}{head_row + rows_written}"
+    ws.sheet_view.showGridLines = False
+    ws.page_setup.orientation = "landscape"
+    ws.page_setup.fitToWidth = 1
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.print_title_rows = f"{head_row}:{head_row}"
+    ws.page_margins = PageMargins(left=0.4, right=0.4, top=0.5, bottom=0.5)
+
+    # ============================================================ SHEET 2
+    ws2 = wb.create_sheet("Rincian Jawaban")
+    qcols = [qmap[q] for q in q_ids if q in qmap]
+    h2 = ["No", "Nama Siswa", "NISN/NIP"] + [f"S{i + 1}" for i in range(len(qcols))] + ["Poin", "Nilai"]
+    n2 = len(h2)
+    lc2 = get_column_letter(n2)
+    ws2.merge_cells(f"A1:{lc2}1")
+    c = ws2.cell(row=1, column=1, value=f"RINCIAN PEROLEHAN POIN PER SOAL — {session['title']}")
+    c.font = Font(bold=True, size=12, color=XL_GREEN)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws2.row_dimensions[1].height = 20
+    ws2.merge_cells(f"A2:{lc2}2")
+    c = ws2.cell(row=2, column=1, value="Angka pada kolom soal = poin yang diperoleh siswa. Arahkan kursor ke judul kolom untuk melihat teks soal.")
+    c.font = Font(size=8, italic=True, color="9A9A92")
+    c.alignment = Alignment(horizontal="center")
+
+    for i, h in enumerate(h2, start=1):
+        c = ws2.cell(row=4, column=i, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = PatternFill("solid", fgColor=XL_GREEN)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = thin
+        if 4 <= i <= 3 + len(qcols):
+            q = qcols[i - 4]
+            kunci = ""
+            if q["type"] == "pg" and q.get("correct_answer") is not None:
+                try:
+                    kunci = f" | Kunci: {chr(65 + int(q['correct_answer']))}"
+                except (ValueError, TypeError):
+                    kunci = ""
+            elif q["type"] == "truefalse":
+                kunci = f" | Kunci: {'Benar' if q.get('correct_answer') == 'true' else 'Salah'}"
+            c.comment = _xl_comment(f"[{QTYPE_ID.get(q['type'], q['type'])}] {q['text']}{kunci}")
+    ws2.row_dimensions[4].height = 24
+
+    for idx, a in enumerate(attempts, start=1):
+        rr = 4 + idx
+        dmap = {d["question_id"]: d for d in (a.get("details") or [])}
+        vals = [idx, a.get("student_name", "-"), a.get("student_identifier") or "-"]
+        for q in qcols:
+            d = dmap.get(q["id"])
+            vals.append(d.get("points_earned") if d else "-")
+        vals += [f"{a.get('earned', 0)}/{a.get('total_possible', 0)}",
+                 a.get("score") if a.get("score") is not None else "-"]
+        for ci, v in enumerate(vals, start=1):
+            c = ws2.cell(row=rr, column=ci, value=v)
+            c.border = thin
+            c.font = Font(size=10, bold=ci in (2, n2))
+            c.alignment = Alignment(horizontal="left" if ci in (2, 3) else "center", vertical="center")
+            if idx % 2 == 0:
+                c.fill = PatternFill("solid", fgColor=XL_STRIPE)
+            if 4 <= ci <= 3 + len(qcols):
+                d = dmap.get(qcols[ci - 4]["id"])
+                if d and d.get("is_correct") is True:
+                    c.fill = PatternFill("solid", fgColor=XL_GREEN_SOFT)
+                elif d and d.get("is_correct") is False:
+                    c.fill = PatternFill("solid", fgColor=XL_TERRA_SOFT)
+                elif d and d.get("type") == "essay":
+                    c.fill = PatternFill("solid", fgColor=XL_GOLD_SOFT)
+
+    ws2.column_dimensions["A"].width = 5
+    ws2.column_dimensions["B"].width = 28
+    ws2.column_dimensions["C"].width = 15
+    for i in range(4, 4 + len(qcols)):
+        ws2.column_dimensions[get_column_letter(i)].width = 6.5
+    ws2.column_dimensions[get_column_letter(n2 - 1)].width = 11
+    ws2.column_dimensions[get_column_letter(n2)].width = 9
+    ws2.freeze_panes = "D5"
+    ws2.sheet_view.showGridLines = False
+    ws2.page_setup.orientation = "landscape"
+    ws2.page_setup.fitToWidth = 1
+    ws2.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # ============================================================ SHEET 3
+    ws3 = wb.create_sheet("Analisis Butir")
+    settings = await db.settings.find_one({"key": "difficulty"}, {"_id": 0})
+    if pkg.get("easy_min") is not None and pkg.get("medium_min") is not None:
+        easy_min, medium_min, src = pkg["easy_min"], pkg["medium_min"], "khusus paket"
+    else:
+        easy_min = settings.get("easy_min", 70) if settings else 70
+        medium_min = settings.get("medium_min", 40) if settings else 40
+        src = "global"
+
+    h3 = ["No", "Tipe", "Soal", "Kunci", "Benar", "Peserta", "% Benar", "Kesukaran"]
+    lc3 = get_column_letter(len(h3))
+    ws3.merge_cells(f"A1:{lc3}1")
+    c = ws3.cell(row=1, column=1, value=f"ANALISIS BUTIR SOAL — {session['title']}")
+    c.font = Font(bold=True, size=12, color=XL_GREEN)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws3.row_dimensions[1].height = 20
+    ws3.merge_cells(f"A2:{lc3}2")
+    c = ws3.cell(row=2, column=1, value=(
+        f"Ambang ({src}): Mudah ≥ {easy_min}% · Sedang ≥ {medium_min}% · Sulit < {medium_min}%"))
+    c.font = Font(size=8, italic=True, color="9A9A92")
+    c.alignment = Alignment(horizontal="center")
+
+    for i, h in enumerate(h3, start=1):
+        c = ws3.cell(row=4, column=i, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = PatternFill("solid", fgColor=XL_GREEN)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = thin
+    ws3.row_dimensions[4].height = 24
+
+    diff_fill = {"Mudah": XL_GREEN_SOFT, "Sedang": XL_GOLD_SOFT, "Sulit": XL_TERRA_SOFT}
+    diff_font = {"Mudah": XL_GREEN, "Sedang": "8A6D1F", "Sulit": XL_TERRA}
+    for i, q in enumerate(qcols, start=1):
+        total = benar = 0
+        pts_e = pts_p = 0.0
+        for a in attempts:
+            d = next((x for x in (a.get("details") or []) if x["question_id"] == q["id"]), None)
+            if not d:
+                continue
+            total += 1
+            if q["type"] in ("pg", "truefalse"):
+                if d.get("is_correct"):
+                    benar += 1
+            else:
+                pts_e += d.get("points_earned") or 0
+                pts_p += d.get("points_possible") or 0
+        if q["type"] in ("pg", "truefalse"):
+            pct = round(benar / total * 100, 1) if total else 0.0
+        else:
+            pct = round(pts_e / pts_p * 100, 1) if pts_p else 0.0
+        label = "Mudah" if pct >= easy_min else ("Sedang" if pct >= medium_min else "Sulit")
+        kunci = "-"
+        if q["type"] == "pg" and q.get("correct_answer") is not None:
+            try:
+                kunci = chr(65 + int(q["correct_answer"]))
+            except (ValueError, TypeError):
+                kunci = "-"
+        elif q["type"] == "truefalse":
+            kunci = "Benar" if q.get("correct_answer") == "true" else "Salah"
+        rr = 4 + i
+        vals = [i, QTYPE_ID.get(q["type"], q["type"]), q["text"], kunci,
+                benar if q["type"] in ("pg", "truefalse") else "-", total, pct / 100, label]
+        for ci, v in enumerate(vals, start=1):
+            c = ws3.cell(row=rr, column=ci, value=v)
+            c.border = thin
+            c.font = Font(size=10)
+            c.alignment = Alignment(horizontal="left" if ci == 3 else "center",
+                                    vertical="center", wrap_text=ci == 3)
+            if i % 2 == 0:
+                c.fill = PatternFill("solid", fgColor=XL_STRIPE)
+        ws3.cell(row=rr, column=7).number_format = "0.0%"
+        lab = ws3.cell(row=rr, column=8)
+        lab.fill = PatternFill("solid", fgColor=diff_fill[label])
+        lab.font = Font(size=10, bold=True, color=diff_font[label])
+
+    for col, w in zip("ABCDEFGH", [5, 13, 62, 9, 9, 9, 10, 12]):
+        ws3.column_dimensions[col].width = w
+    ws3.freeze_panes = "A5"
+    ws3.sheet_view.showGridLines = False
+    ws3.page_setup.orientation = "landscape"
+    ws3.page_setup.fitToWidth = 1
+    ws3.sheet_properties.pageSetUpPr.fitToPage = True
+
+    # ============================================================ SHEET 4 (lockdown)
+    # include in-progress attempts here so teachers can spot cheating live
+    all_attempts = await db.attempts.find({"session_id": session_id}, {"_id": 0}).to_list(5000)
+    all_attempts.sort(key=lambda a: (a.get("student_name") or "").lower())
+    viol_rows = []
+    for a in all_attempts:
+        for k, v in enumerate(a.get("violations") or [], start=1):
+            viol_rows.append([a.get("student_name", "-"), a.get("student_identifier") or "-",
+                              k, v.get("label") or v.get("type", "-"), fmt_dt_id(v.get("at")),
+                              "Ya" if a.get("auto_submitted_reason") == "pelanggaran" else "Tidak",
+                              STATUS_ID.get(a.get("status"), a.get("status", "-"))])
+    ws4 = wb.create_sheet("Pelanggaran")
+    ws4.sheet_view.showGridLines = False
+    h4 = ["Nama Siswa", "NISN/NIP", "Pelanggaran ke-", "Jenis Pelanggaran",
+          "Waktu", "Dikumpulkan Otomatis", "Status Ujian"]
+    lc4 = get_column_letter(len(h4))
+    ws4.merge_cells(f"A1:{lc4}1")
+    c = ws4.cell(row=1, column=1, value=f"CATATAN PELANGGARAN MODE UJIAN KETAT — {session['title']}")
+    c.font = Font(bold=True, size=12, color=XL_GREEN)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws4.row_dimensions[1].height = 20
+    ws4.merge_cells(f"A2:{lc4}2")
+    c = ws4.cell(row=2, column=1, value=(
+        "Tercatat setiap kali siswa keluar dari layar ujian (pindah tab, minimize, keluar layar penuh, "
+        f"atau menekan tombol terlarang). Batas pelanggaran: {(await get_exam_lock())['max_violations']}x."))
+    c.font = Font(size=8, italic=True, color="9A9A92")
+    c.alignment = Alignment(horizontal="center")
+    for i, h in enumerate(h4, start=1):
+        cell = ws4.cell(row=4, column=i, value=h)
+        cell.font = Font(bold=True, color="FFFFFF", size=10)
+        cell.fill = PatternFill("solid", fgColor=XL_GREEN)
+        cell.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        cell.border = thin
+    ws4.row_dimensions[4].height = 24
+    if viol_rows:
+        for ri, row in enumerate(viol_rows, start=5):
+            for ci, v in enumerate(row, start=1):
+                cell = ws4.cell(row=ri, column=ci, value=v)
+                cell.border = thin
+                cell.font = Font(size=10, bold=ci == 1)
+                cell.alignment = Alignment(horizontal="left" if ci in (1, 2, 4) else "center",
+                                           vertical="center")
+                if ri % 2 == 1:
+                    cell.fill = PatternFill("solid", fgColor=XL_STRIPE)
+            if row[5] == "Ya":
+                cell = ws4.cell(row=ri, column=6)
+                cell.fill = PatternFill("solid", fgColor=XL_TERRA_SOFT)
+                cell.font = Font(size=10, bold=True, color=XL_TERRA)
+        ws4.auto_filter.ref = f"A4:{lc4}{4 + len(viol_rows)}"
+    else:
+        ws4.merge_cells(start_row=5, start_column=1, end_row=5, end_column=len(h4))
+        cell = ws4.cell(row=5, column=1, value="Tidak ada pelanggaran tercatat pada sesi ini.")
+        cell.font = Font(size=10, italic=True, color="7A7A72")
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = thin
+    for col, w in zip("ABCDEFG", [28, 15, 15, 30, 20, 20, 18]):
+        ws4.column_dimensions[col].width = w
+    ws4.freeze_panes = "A5"
+    ws4.page_setup.orientation = "landscape"
+    ws4.page_setup.fitToWidth = 1
+    ws4.sheet_properties.pageSetUpPr.fitToPage = True
+
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe = "".join(ch if ch.isalnum() or ch in "-_ " else "" for ch in session["title"]).strip()
+    fname = f"hasil-{safe or 'sesi'}.xlsx".replace(" ", "_")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}"})
+
 
 
 # ------------------------------------------------------------------ CLASS GRADE EXPORT (Excel)
@@ -1567,7 +2409,8 @@ async def notifications(user: dict = Depends(require_roles("siswa"))):
 
 # ------------------------------------------------------------------ SCHOOL SETTINGS
 @api_router.get("/settings/school")
-async def get_school(user: dict = Depends(get_current_user)):
+async def get_school():
+    """Public: school identity/theme is needed to brand the login screen."""
     doc = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
     return {"name": doc.get("name", ""), "address": doc.get("address", ""),
             "logo_path": doc.get("logo_path"), "theme_color": doc.get("theme_color")}
@@ -1612,6 +2455,79 @@ async def _school_kop(styles, green, sub):
     from reportlab.lib import colors
     line = Table([[""]], colWidths=[520 * 0.35])
     return head + [Spacer(1, 6)]
+
+# ------------------------------------------------------------------ EXAM LOCK (mode ujian ketat)
+VIOLATION_LABEL = {
+    "tab_hidden": "Pindah tab / minimize",
+    "window_blur": "Keluar dari jendela ujian",
+    "fullscreen_exit": "Keluar dari layar penuh",
+    "copy_attempt": "Mencoba menyalin teks",
+    "shortcut_blocked": "Menekan tombol terlarang",
+    "reload_attempt": "Mencoba memuat ulang halaman",
+}
+EXAM_LOCK_DEFAULT = {"enabled": True, "max_violations": 3}
+
+
+class ExamLockBody(BaseModel):
+    enabled: bool = True
+    max_violations: int = 3
+
+
+class ViolationBody(BaseModel):
+    session_id: str
+    type: str = "tab_hidden"
+
+
+async def get_exam_lock() -> dict:
+    doc = await db.settings.find_one({"key": "exam_lock"}, {"_id": 0}) or {}
+    return {"enabled": bool(doc.get("enabled", True)),
+            "max_violations": int(doc.get("max_violations", 3))}
+
+
+@api_router.get("/settings/exam-lock")
+async def read_exam_lock(user: dict = Depends(get_current_user)):
+    """Readable by students too — the exam screen needs the violation limit."""
+    return await get_exam_lock()
+
+
+@api_router.put("/settings/exam-lock")
+async def set_exam_lock(body: ExamLockBody, user: dict = Depends(require_roles("admin", "guru"))):
+    n = max(1, min(20, int(body.max_violations)))
+    doc = {"key": "exam_lock", "enabled": bool(body.enabled), "max_violations": n}
+    await db.settings.update_one({"key": "exam_lock"}, {"$set": doc}, upsert=True)
+    return {"enabled": doc["enabled"], "max_violations": n}
+
+
+@api_router.post("/exam/violation")
+async def record_violation(body: ViolationBody, user: dict = Depends(require_roles("siswa"))):
+    """Log a lockdown violation. Auto-submits the attempt once the limit is reached."""
+    attempt = await db.attempts.find_one(
+        {"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
+    if not attempt:
+        raise HTTPException(status_code=404, detail="Percobaan tidak ditemukan")
+    cfg = await get_exam_lock()
+    if attempt["status"] != "berlangsung":
+        return {"count": len(attempt.get("violations", [])),
+                "max_violations": cfg["max_violations"],
+                "auto_submitted": True, "already_submitted": True}
+
+    vtype = body.type if body.type in VIOLATION_LABEL else "tab_hidden"
+    entry = {"type": vtype, "label": VIOLATION_LABEL[vtype], "at": now_iso()}
+    await db.attempts.update_one({"id": attempt["id"]}, {"$push": {"violations": entry}})
+    count = len(attempt.get("violations", [])) + 1
+
+    auto = False
+    if cfg["enabled"] and count >= cfg["max_violations"]:
+        fresh = await db.attempts.find_one({"id": attempt["id"]}, {"_id": 0})
+        await finalize_attempt(fresh, fresh.get("answers", {}))
+        await db.attempts.update_one({"id": attempt["id"]},
+                                     {"$set": {"auto_submitted_reason": "pelanggaran"}})
+        auto = True
+        logger.info(f"Exam auto-submitted for {user['email']} after {count} violation(s)")
+    return {"count": count, "max_violations": cfg["max_violations"],
+            "auto_submitted": auto, "label": entry["label"]}
+
+
 
 
 # ------------------------------------------------------------------ DIFFICULTY SETTINGS
