@@ -1,0 +1,44 @@
+{
+  "summary": "Iteration 3 (Auto-Submit cron, Item Analytics, Excel export, Image upload/Bank Media Soal) fully tested end-to-end. Backend pytest: 14/14 PASSED (new file /app/backend/tests/test_iteration3.py). Includes real timing-based auto-submit test: created a session ending in ~12s with duration 60m, siswa POST /api/exam/start, waited 15s, POST /api/cron/auto-submit with Bearer <WEBHOOK_CRON_SECRET>, then polled /api/results/detail/{id} and confirmed status flipped from 'berlangsung' -> 'selesai' with score=0.0 (student never answered). Auth on cron endpoint verified: no token -> 401, wrong token -> 401, correct token -> 200 {accepted:true}. Analytics: /api/analytics/session/{id} returns correct shape, verified 100% Mudah + 0% Sulit thresholds with a controlled attempt. Excel export: /api/export/class/{id}/xlsx returns spreadsheetml content-type, PK zip header, valid workbook.xml. Image upload: PNG accepted, .txt returns 400, siswa cannot upload (403), /api/files/{path} returns 401 without token, 404 for unknown path, 200 with Bearer header AND with ?auth=<token> query param. Image integration end-to-end: image_path persists on question, appears in /api/exam/start question payload, and in /api/results/detail. Frontend UI verified with Playwright on preview URL: admin login OK, /admin/kelas shows classes-page + export-grades-{id} button (clicking triggered actual .xlsx download 'rekap-nilai-Kelas X-A.xlsx'), /admin/hasil opens a session -> analytics-btn -> analytics-view -> 3 analytics-item-* cards rendered, /admin/soal question editor shows Unggah Gambar (upload-image-btn) + hidden question-image-input.",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/questions/import", "issue": "STILL PRESENT from iteration 2: numeric PG options become 'X.0' float-strings (visible in question list e.g. 'A. 3.0'). Not iteration-3 scope but visible on Bank Soal page. RCA: pandas dtype inference despite dtype=str param - reads only when column has NaN? Verify by testing again."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Question editor dialog", "issues": ["Modal overlay z-index shows underlying question list bleeding through slightly (see screenshot) - text of listed questions appears behind the dialog; likely because DialogContent background is not fully opaque. Cosmetic only."]},
+      {"screen": "Admin Dashboard chart", "issues": ["Pre-existing harmless Recharts width(-1)/height(-1) warning on initial mount"]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration3.py",
+    "/app/test_reports/pytest/pytest_iteration3.xml"
+  ],
+  "action_items": [
+    "(carry-over from iter 2) Fix /api/questions/import numeric-option coercion so PG options like 3/4/5/6 do not persist as '3.0'/'4.0'.",
+    "Consider making DialogContent background fully opaque so underlying content does not bleed through Bank Soal editor modal (cosmetic)."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1191 lines - increasingly urgent to split into routers (auth/users/content/exam/results/import/classes/uploads/cron/analytics/export).",
+    "run_auto_submit does a scan-all: db.attempts.find({'status':'berlangsung'}).to_list(5000) then N sessions per attempt. At scale add index on attempts.status and batch-load sessions by id.",
+    "/api/files/{path:path} only checks JWT signature - it does NOT verify the token's role or that this user is entitled to view this file. Any authenticated user (incl. any siswa) can fetch any question image if they know the path. Acceptable for public-question images but worth documenting.",
+    "run_auto_submit uses datetime.fromisoformat - if any session.end_time is naive it will crash the comparison; consider try/except (currently caught) but silently skipping without logging.",
+    "put_object/get_object are sync `requests` calls inside async endpoints - blocks the event loop; consider httpx.AsyncClient or run_in_executor for large images.",
+    "cron secret uses hmac.compare_digest against the *empty string* if secret unset -> would 401 which is correct, but startup should log a warning if WEBHOOK_CRON_SECRET is missing.",
+    "export_class_grades: session filter `class_ids: {$size: 0}` OR `$exists: false` treats every empty/open session as belonging to this class - documented behaviour per spec but produces very wide sheets if many open sessions exist."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration3.py (new)"
+  ],
+  "success_rate": {"backend": "100% (14/14)", "frontend": "100% for tested selectors + real download + real analytics render"},
+  "test_credentials": "Admin hitoria532@gmail.com/admin123, Guru guru@sekolah.id/guru123, Siswa siswa@sekolah.id/siswa123. WEBHOOK_CRON_SECRET read from /app/backend/.env",
+  "seed_data_creation": "All test data prefixed TEST_ and cleaned up in each test. One image file remains in object storage from test_upload_and_fetch_png / test_question_with_image_flows_to_exam_and_result (no delete endpoint) - negligible.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 3 features are all green. Regression from iter 2: numeric PG option float coercion in /api/questions/import still visible in seeded/imported questions ('A. 3.0'). Auto-submit end-to-end test uses a 15s wait - if you re-run frequently, be aware. Cron secret currently: same value in .env. Object storage init runs at backend startup and is reachable. The /api/files/{path} endpoint does not enforce ownership - only token validity - intentional for now.",
+  "rca of the issue": "Not applicable - all iteration-3 tests passed. Carry-over iter-2 float-option bug RCA already documented in iteration_2.json."
+}

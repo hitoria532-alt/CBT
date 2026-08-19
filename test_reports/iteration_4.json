@@ -1,0 +1,50 @@
+{
+  "summary": "Iteration 4 (Bank Rumus Nilai, Analitik Kelas, Soal Gambar Massal, Pengumuman Sesi) tested end-to-end. Backend pytest 12/12 PASSED (/app/backend/tests/test_iteration4.py). Frontend UI verified with Playwright on preview URL for all four new features. Found and FIXED one critical crash bug: /app/frontend/src/pages/admin/Sessions.jsx used <Textarea> without importing it, so the entire 'Tambah/Edit Sesi' dialog crashed (React error boundary) and session-announcement-input was never rendered. Added `import { Textarea } from '../../components/ui/textarea'` — dialog now renders and typing into announcement works. All other selectors were already present and functional: min-score-input, rounding-select on Paket dialog; class-avg-chart + score-trend-chart on /admin dashboard; notif-bell + notif-panel on siswa header (dropdown shows the seeded 'UH Matematika - Kelas X' as a live notification with body 'Ujian sedang berlangsung — segera kerjakan.').",
+  "backend_issues": {
+    "critical": [],
+    "minor": [
+      {"endpoint": "POST /api/questions/import (image_url)", "issue": "fetch_image_to_storage() uses default python-requests User-Agent; many public hosts (wikipedia/upload.wikimedia.org) return 403 to that UA, so importing image_url from those sources silently drops the image (question is still imported, image_path=null). Not a crash — matches the spec ('invalid URLs are ignored') — but worth adding a browser-like UA header so common hosts like Wikimedia succeed."},
+      {"endpoint": "GET /api/notifications", "issue": "Silent try/except around datetime.fromisoformat drops the whole session from notifications when start_time/end_time is naive/malformed; consider logging."}
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [
+      {"component": "pages/admin/Sessions.jsx", "issue": "FIXED IN THIS ITERATION. Missing import of Textarea caused React error boundary when opening 'Tambah/Edit Sesi' dialog, hiding data-testid=session-announcement-input. Added the missing import.", "selector": "[data-testid=\"session-announcement-input\"]", "priority": "HIGH"}
+    ],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Sesi Pelaksanaan dialog", "issues": ["Waktu Mulai/Selesai still use native <input type=datetime-local> instead of a shadcn calendar/time picker (system prompt calls this out as a preference)."]},
+      {"screen": "Admin Dashboard charts", "issues": ["Recharts prints repeated `width(-1) height(-1)` warnings on mount for both class-avg-chart and score-trend-chart. Harmless (charts render after resize) but noisy."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration4.py",
+    "/app/test_reports/pytest/pytest_iteration4.xml"
+  ],
+  "action_items": [
+    "(minor) In backend/server.py fetch_image_to_storage(), send a common browser User-Agent so Wikimedia/other UA-gated hosts don't return 403 when teachers import image_url rows.",
+    "(cosmetic) Fix Recharts width(-1)/height(-1) warnings for class-avg-chart / score-trend-chart (usually a ResponsiveContainer parent needs explicit height).",
+    "(cosmetic) Consider replacing native datetime-local pickers on Sesi dialog with the shadcn calendar+time picker for consistency."
+  ],
+  "critical_code_review_comments": [
+    "server.py is now 1305 lines — split into routers is overdue (auth/content/exam/results/import/classes/uploads/cron/analytics/notifications/export).",
+    "GET /api/analytics/classes does N+1 to db.attempts.find per class AND per session for the trend. For a real classroom with dozens of sessions this will be slow — a single aggregation ($lookup or $group) would be much better.",
+    "GET /api/notifications does db.attempts.find_one per session in a Python loop; batch-fetch all attempts for this student in one query then join in-memory.",
+    "compute_grade() applies min_score AFTER rounding but does NOT re-round after clamping. If min_score=40.5 and raw rounds to 40, score becomes 40.5 which contradicts rounding='bulat'. Consider rounding the max(raw,min_score) or documenting the semantics.",
+    "fetch_image_to_storage() defaults User-Agent to python-requests, which is blocked by many public image hosts.",
+    "Session model uses Optional[str] = '' for announcement — fine, but /api/notifications only checks truthiness so whitespace-only announcements would still fire as info notifications.",
+    "The score-floor logic silently masks 0.0 -> min_score for students who never opened the exam (auto-submit finalize) — this could inflate class averages. Product decision, but worth flagging.",
+    "notif dropdown mark-all-seen relies on localStorage timestamp only — cross-device users will keep seeing badges. Consider a server-side seen state if needed."
+  ],
+  "updated_files": [
+    "/app/backend/tests/test_iteration4.py (new, 12 tests)",
+    "/app/frontend/src/pages/admin/Sessions.jsx (added Textarea import — FIX)"
+  ],
+  "success_rate": {"backend": "100% (12/12)", "frontend": "100% for all four features after Sessions.jsx Textarea import fix"},
+  "test_credentials": "Admin hitoria532@gmail.com/admin123, Guru guru@sekolah.id/guru123, Siswa siswa@sekolah.id/siswa123",
+  "seed_data_creation": "All test data prefixed TEST_I4_ and cleaned up per test. Test import uses https://httpbin.org/image/png (small public PNG) because Wikimedia blocks python-requests default UA.",
+  "retest_needed": false,
+  "main_agent_can_self_test": true,
+  "context_for_next_testing_agent": "Iteration 4 is green after the Sessions.jsx Textarea import fix. Backend regression tests from iterations 1-3 still available under /app/backend/tests/. When creating a live-session end-to-end scoring test, use scoring_method='percentage' + n=3 PG questions + min_score=40 + rounding='bulat', answer 1/3 correct -> score is exactly 40.0. Carry-over from iter 2: CSV import numeric-option float-string coercion ('3.0') is still visible on seeded imported questions — not iteration 4 scope.",
+  "rca of the issue": "Sessions.jsx used <Textarea> for the new Pengumuman field without importing it. On dialog open React threw 'Textarea is not defined', hit the app's error boundary, and unmounted the dialog contents — that's why data-testid=session-announcement-input appeared 'MISSING' in Playwright even though backend-side Session.announcement field was fully functional. Fix: added `import { Textarea } from '../../components/ui/textarea';`. Confirmed via Playwright: dialog now opens, textarea accepts input, backend accepts the announcement and it appears as an 'info' notification for the siswa."
+}

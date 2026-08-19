@@ -1,0 +1,87 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+    margin: 0;
+    font-family: 'IBM Plex Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+h1, h2, h3, h4, h5, .font-heading {
+    font-family: 'Outfit', sans-serif;
+}
+
+.font-mono {
+    font-family: 'IBM Plex Mono', monospace;
+}
+
+code {
+    font-family: 'IBM Plex Mono', monospace;
+}
+
+@layer base {
+    :root {
+        --background: 60 20% 98%;
+        --foreground: 160 5% 10%;
+        --card: 0 0% 100%;
+        --card-foreground: 160 5% 10%;
+        --popover: 0 0% 100%;
+        --popover-foreground: 160 5% 10%;
+        --primary: 157 35% 18%;
+        --primary-foreground: 60 20% 98%;
+        --secondary: 150 12% 56%;
+        --secondary-foreground: 157 35% 18%;
+        --muted: 60 10% 92%;
+        --muted-foreground: 150 5% 45%;
+        --accent: 10 58% 53%;
+        --accent-foreground: 0 0% 100%;
+        --destructive: 10 58% 53%;
+        --destructive-foreground: 60 20% 98%;
+        --border: 60 10% 88%;
+        --input: 60 10% 88%;
+        --ring: 157 35% 18%;
+        --chart-1: 157 35% 28%;
+        --chart-2: 10 58% 53%;
+        --chart-3: 150 12% 56%;
+        --chart-4: 43 60% 55%;
+        --chart-5: 197 37% 40%;
+        --radius: 0.5rem;
+    }
+    .dark {
+        --background: 160 10% 8%;
+        --foreground: 60 20% 95%;
+        --card: 160 8% 12%;
+        --card-foreground: 60 20% 95%;
+        --popover: 160 8% 12%;
+        --popover-foreground: 60 20% 95%;
+        --primary: 150 25% 65%;
+        --primary-foreground: 160 10% 8%;
+        --secondary: 160 8% 20%;
+        --secondary-foreground: 60 20% 95%;
+        --muted: 160 8% 20%;
+        --muted-foreground: 150 5% 65%;
+        --accent: 10 50% 60%;
+        --accent-foreground: 160 10% 8%;
+        --destructive: 0 62% 40%;
+        --destructive-foreground: 60 20% 95%;
+        --border: 160 8% 20%;
+        --input: 160 8% 20%;
+        --ring: 150 25% 65%;
+    }
+}
+
+@layer base {
+    * {
+        @apply border-border;
+    }
+    body {
+        @apply bg-background text-foreground;
+    }
+}
+
+::selection {
+    background: hsl(var(--primary));
+    color: hsl(var(--primary-foreground));
+}

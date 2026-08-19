@@ -1,0 +1,34 @@
+[
+  {
+    "content": "Connect GitHub & inspect repo commits (hitoria532-alt/CBT)",
+    "status": "completed"
+  },
+  {
+    "content": "Sync repo code into /app preserving .env",
+    "status": "completed"
+  },
+  {
+    "content": "Restore required env vars (JWT_SECRET, ADMIN, storage key)",
+    "status": "completed"
+  },
+  {
+    "content": "Install backend + frontend dependencies",
+    "status": "completed"
+  },
+  {
+    "content": "Restart services & verify app runs on live preview",
+    "status": "completed"
+  },
+  {
+    "content": "Seed demo data (DB was empty) via scripts/seed_demo.py",
+    "status": "completed"
+  },
+  {
+    "content": "Fix naive/aware datetime 500s (notifications, sessions, exam/start)",
+    "status": "completed"
+  },
+  {
+    "content": "End-to-end testing with testing agent (backend 55/56, frontend 100%)",
+    "status": "completed"
+  }
+]
