@@ -300,9 +300,10 @@ export default function Questions() {
               <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, option_e, correct, weight, category, image_url</code>
             </p>
             <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
-              <li><b>type</b>: pg / truefalse / essay</li>
-              <li><b>correct</b>: untuk PG isi A/B/C/D/E · untuk B/S isi benar/salah</li>
+              <li><b>type</b>: pg / truefalse / essay — boleh juga "Pilihan Ganda", "Uraian" (kosong = ditebak otomatis)</li>
+              <li><b>correct</b>: untuk PG isi A/B/C/D/E (atau teks jawabannya) · untuk B/S isi benar/salah</li>
               <li><b>option_e</b>: opsional — kosongkan bila soal hanya sampai D</li>
+              <li>Nama kolom alternatif dikenali: <i>soal, pertanyaan, butir soal, a–e, kunci, bobot, mapel, gambar</i></li>
               <li><b>category</b>: nama kategori (dibuat otomatis bila belum ada)</li>
               <li><b>image_url</b>: (opsional) tautan gambar soal, diunduh otomatis</li>
             </ul>

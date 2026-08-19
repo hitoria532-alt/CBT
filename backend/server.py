@@ -1018,18 +1018,44 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
     imported = 0
     errors = []
     letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3", "e": "4"}
+    OPT_ALIASES = [
+        ("option_a", "opsi_a", "pilihan_a", "jawaban_a", "a"),
+        ("option_b", "opsi_b", "pilihan_b", "jawaban_b", "b"),
+        ("option_c", "opsi_c", "pilihan_c", "jawaban_c", "c"),
+        ("option_d", "opsi_d", "pilihan_d", "jawaban_d", "d"),
+        ("option_e", "opsi_e", "pilihan_e", "jawaban_e", "e"),
+    ]
+    TYPE_ALIASES = {
+        "pg": "pg", "pilihan ganda": "pg", "pilihan_ganda": "pg", "multiple choice": "pg", "mc": "pg",
+        "truefalse": "truefalse", "true/false": "truefalse", "benar/salah": "truefalse",
+        "benar salah": "truefalse", "bs": "truefalse", "b/s": "truefalse",
+        "essay": "essay", "esai": "essay", "uraian": "essay", "isian": "essay",
+    }
     for i, row in df.iterrows():
         rownum = i + 2
         try:
-            qtype = str(row.get("type", "")).strip().lower()
-            text = str(row.get("text", "")).strip()
-            if not text or text.lower() == "nan" or qtype not in ("pg", "truefalse", "essay"):
-                errors.append(f"Baris {rownum}: tipe/teks tidak valid")
+            text = _cell(row, "text", "soal", "pertanyaan", "butir_soal", "butir soal", "uraian", "deskripsi")
+            options_raw = [_cell(row, *aliases) for aliases in OPT_ALIASES]
+            raw_c = _cell(row, "correct", "kunci", "kunci_jawaban", "kunci jawaban",
+                          "jawaban", "jawaban_benar", "key").lower()
+
+            qtype = TYPE_ALIASES.get(_cell(row, "type", "tipe", "jenis", "jenis_soal",
+                                           "tipe_soal", "bentuk").lower(), None)
+            if not qtype:  # tebak tipe soal bila kolom tipe tidak ada
+                if any(options_raw):
+                    qtype = "pg"
+                elif raw_c in ("benar", "salah", "true", "false", "b", "s"):
+                    qtype = "truefalse"
+                else:
+                    qtype = "essay"
+            if not text:
+                errors.append(f"Baris {rownum}: teks soal kosong")
                 continue
-            # category
-            cat_name = str(row.get("category", "")).strip()
+
+            cat_name = _cell(row, "category", "kategori", "mapel", "mata_pelajaran",
+                             "mata pelajaran", "materi", "pelajaran")
             cat_id = None
-            if cat_name and cat_name.lower() != "nan":
+            if cat_name:
                 key = cat_name.lower()
                 if key not in cat_by_name:
                     nc = Category(name=cat_name)
@@ -1038,38 +1064,39 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
                 cat_id = cat_by_name[key]
             weight = 1.0
             try:
-                wv = str(row.get("weight", "") or "").strip()
-                weight = float(wv) if wv and wv.lower() != "nan" else 1.0
+                wv = _cell(row, "weight", "bobot", "skor", "poin", "point")
+                weight = float(str(wv).replace(",", ".")) if wv else 1.0
             except (ValueError, TypeError):
                 weight = 1.0
-            if weight != weight:  # NaN guard
+            if weight != weight or weight <= 0:  # NaN / invalid guard
                 weight = 1.0
 
             options, correct = [], None
             if qtype == "pg":
-                for col in ("option_a", "option_b", "option_c", "option_d", "option_e"):
-                    v = row.get(col, "")
-                    v = "" if (v is None or str(v).lower() == "nan") else str(v).strip()
-                    if v:
-                        options.append(v)
-                raw_c = str(row.get("correct", "")).strip().lower()
+                options = [v for v in options_raw if v]
+                if len(options) < 2:
+                    errors.append(f"Baris {rownum}: soal PG butuh minimal 2 opsi")
+                    continue
                 if raw_c in letter_idx:
                     correct = letter_idx[raw_c]
                 elif raw_c.isdigit():
                     correct = raw_c
                 else:
-                    errors.append(f"Baris {rownum}: kunci PG tidak valid")
-                    continue
+                    # kunci bisa berisi teks jawabannya, cocokkan dengan opsi
+                    match = next((str(i) for i, o in enumerate(options) if o.lower() == raw_c), None)
+                    if match is None:
+                        errors.append(f"Baris {rownum}: kunci PG '{raw_c or '(kosong)'}' tidak valid (pakai A–E)")
+                        continue
+                    correct = match
                 if int(correct) >= len(options):
                     errors.append(f"Baris {rownum}: kunci '{raw_c.upper()}' menunjuk opsi yang kosong")
                     continue
             elif qtype == "truefalse":
-                raw_c = str(row.get("correct", "")).strip().lower()
-                correct = "true" if raw_c in ("true", "benar", "b", "1") else "false"
+                correct = "true" if raw_c in ("true", "benar", "b", "1", "ya", "y") else "false"
 
             image_path = None
-            img_url = str(row.get("image_url", "") or "").strip()
-            if img_url and img_url.lower() != "nan" and img_url.startswith("http"):
+            img_url = _cell(row, "image_url", "gambar", "url_gambar", "link_gambar", "image")
+            if img_url and img_url.startswith("http"):
                 image_path = await fetch_image_to_storage(img_url, user["id"])
 
             ques = Question(category_id=cat_id, type=qtype, text=text,
@@ -1085,10 +1112,10 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
 
 # ------------------------------------------------------------------ USER IMPORT (Excel/CSV)
 USER_IMPORT_TEMPLATE = (
-    "nama,email,password,role,identifier\n"
-    "Ani Siswa,ani@sekolah.id,siswa123,siswa,1001\n"
-    "Budi Siswa,budi@sekolah.id,siswa123,siswa,1002\n"
-    "Pak Rudi,rudi@sekolah.id,guru123,guru,G-01\n"
+    "nama,email,password,role,identifier,kelas\n"
+    "Ani Siswa,ani@sekolah.id,siswa123,siswa,1001,Kelas X-A\n"
+    "Budi Siswa,budi@sekolah.id,siswa123,siswa,1002,Kelas X-A\n"
+    "Pak Rudi,rudi@sekolah.id,guru123,guru,G-01,\n"
 )
 
 ROLE_ALIASES = {
@@ -1133,24 +1160,38 @@ async def import_users(file: UploadFile = File(...), user: dict = Depends(requir
         raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
 
     df.columns = [str(c).strip().lower() for c in df.columns]
-    imported, updated, errors = 0, 0, []
+    imported, updated, errors, notes = 0, 0, [], []
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    cls_by_name = {c["name"].strip().lower(): c for c in classes}
+    class_members = {c["id"]: set(c.get("student_ids", [])) for c in classes}
+    touched_classes = set()
+
     for i, row in df.iterrows():
         rownum = i + 2
         try:
-            full_name = _cell(row, "nama", "name")
-            email = _cell(row, "email", "e-mail").lower()
-            password = _cell(row, "password", "kata_sandi", "sandi")
-            role_raw = _cell(row, "role", "peran", default="siswa").lower()
-            identifier = _cell(row, "identifier", "nis", "nisn", "nip", "nisn/nip")
-            if not full_name or not email:
-                errors.append(f"Baris {rownum}: nama & email wajib diisi")
-                continue
-            if "@" not in email or " " in email:
-                errors.append(f"Baris {rownum}: email '{email}' tidak valid")
+            full_name = _cell(row, "nama", "name", "nama_lengkap", "nama lengkap", "nama_siswa", "nama siswa")
+            email = _cell(row, "email", "e-mail", "surel", "email_siswa").lower()
+            password = _cell(row, "password", "kata_sandi", "sandi", "kata sandi")
+            role_raw = _cell(row, "role", "peran", "jabatan", default="siswa").lower()
+            identifier = _cell(row, "identifier", "nis", "nisn", "nip", "nisn/nip", "no_induk", "no induk")
+            class_name = _cell(row, "kelas", "class", "rombel", "kelas_siswa", "rombongan_belajar")
+            if not full_name:
+                errors.append(f"Baris {rownum}: nama wajib diisi")
                 continue
             role = ROLE_ALIASES.get(role_raw)
             if not role:
                 errors.append(f"Baris {rownum}: role '{role_raw}' tidak dikenal (siswa/guru/admin)")
+                continue
+            if not email:
+                # buat email otomatis dari NISN supaya daftar siswa tanpa email tetap bisa diimpor
+                if identifier and role == "siswa":
+                    email = f"{identifier}@siswa.sekolah.id"
+                    notes.append(f"Baris {rownum}: email dibuat otomatis → {email}")
+                else:
+                    errors.append(f"Baris {rownum}: email wajib diisi")
+                    continue
+            if "@" not in email or " " in email:
+                errors.append(f"Baris {rownum}: email '{email}' tidak valid")
                 continue
 
             existing = await db.users.find_one({"email": email})
@@ -1159,21 +1200,43 @@ async def import_users(file: UploadFile = File(...), user: dict = Depends(requir
                 if password:
                     patch["password_hash"] = hash_password(password)
                 await db.users.update_one({"email": email}, {"$set": patch})
+                user_id = str(existing["_id"])
                 updated += 1
-                continue
-            if not password:
-                errors.append(f"Baris {rownum}: password wajib untuk akun baru ({email})")
-                continue
-            await db.users.insert_one({
-                "email": email, "password_hash": hash_password(password),
-                "name": full_name, "role": role, "identifier": identifier,
-                "created_at": now_iso(),
-            })
-            imported += 1
+            else:
+                if not password:
+                    password = identifier or ("siswa123" if role == "siswa" else "guru123")
+                    notes.append(f"Baris {rownum}: password default '{password}' dipakai untuk {email}")
+                res = await db.users.insert_one({
+                    "email": email, "password_hash": hash_password(password),
+                    "name": full_name, "role": role, "identifier": identifier,
+                    "created_at": now_iso(),
+                })
+                user_id = str(res.inserted_id)
+                imported += 1
+
+            # masukkan siswa ke kelas (kelas dibuat otomatis bila belum ada)
+            if class_name and role == "siswa":
+                key = class_name.lower()
+                cls = cls_by_name.get(key)
+                if not cls:
+                    new_cls = SchoolClass(name=class_name)
+                    await db.classes.insert_one(new_cls.model_dump())
+                    cls = new_cls.model_dump()
+                    cls_by_name[key] = cls
+                    class_members[cls["id"]] = set()
+                    notes.append(f"Kelas '{class_name}' dibuat otomatis")
+                if user_id not in class_members[cls["id"]]:
+                    class_members[cls["id"]].add(user_id)
+                    touched_classes.add(cls["id"])
         except Exception as e:
             errors.append(f"Baris {rownum}: {e}")
 
-    return {"imported": imported, "updated": updated, "errors": errors}
+    for cid in touched_classes:
+        await db.classes.update_one({"id": cid}, {"$set": {"student_ids": sorted(class_members[cid])}})
+
+    return {"imported": imported, "updated": updated, "errors": errors, "notes": notes}
+
+
 # ------------------------------------------------------------------ RESULT PDF
 @api_router.get("/results/detail/{attempt_id}/pdf")
 async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
@@ -1699,6 +1762,176 @@ async def export_class_grades(class_id: str, user: dict = Depends(require_roles(
         headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+# ------------------------------------------------------------------ EXAM CARDS (Kartu Peserta)
+def _sized_logo(logo_path, mm_size):
+    from reportlab.platypus import Image
+    from reportlab.lib.units import mm
+    try:
+        if not logo_path:
+            return None
+        data, _ = get_object(logo_path)
+        return Image(io.BytesIO(data), width=mm_size * mm, height=mm_size * mm)
+    except Exception:
+        return None
+
+
+@api_router.get("/cards/class/{class_id}/pdf")
+async def exam_cards_pdf(class_id: str, session_id: Optional[str] = None,
+                         user: dict = Depends(require_roles("admin", "guru"))):
+    """Kartu peserta ujian per kelas: nama, NISN, kelas, akun, dan daftar sesi.
+
+    4 kartu per halaman A4 (2x2) dengan garis potong, siap dicetak & digunting.
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    sids = cls.get("student_ids", [])
+    students = []
+    if sids:
+        docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in sids]}}).to_list(2000)
+        students = sorted(docs, key=lambda u: u["name"].lower())
+
+    query = {"$or": [{"class_ids": class_id}, {"class_ids": {"$size": 0}}, {"class_ids": {"$exists": False}}]}
+    if session_id:
+        query = {"id": session_id}
+    sessions = await db.sessions.find(query, {"_id": 0}).sort("start_time", 1).to_list(1000)
+    pkg_titles = {}
+    for s in sessions:
+        pkg = await db.packages.find_one({"id": s["package_id"]}, {"_id": 0, "title": 1})
+        pkg_titles[s["id"]] = pkg["title"] if pkg else "-"
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    green = colors.HexColor("#1e3a30")
+    terra = colors.HexColor("#c0563f")
+    grey = colors.HexColor("#7a7a70")
+    lightline = colors.HexColor("#d9d9cf")
+
+    styles = getSampleStyleSheet()
+    st_school = ParagraphStyle("cs", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=8.5,
+                               textColor=green, leading=10)
+    st_addr = ParagraphStyle("ca", parent=styles["Normal"], fontSize=6.5, textColor=grey, leading=8)
+    st_title = ParagraphStyle("ct", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9.5,
+                              textColor=colors.white, alignment=1, leading=12)
+    st_label = ParagraphStyle("cl", parent=styles["Normal"], fontSize=6.5, textColor=grey, leading=8)
+    st_value = ParagraphStyle("cv", parent=styles["Normal"], fontName="Helvetica-Bold", fontSize=9,
+                              textColor=colors.black, leading=11)
+    st_small = ParagraphStyle("csm", parent=styles["Normal"], fontSize=6, textColor=grey, leading=7.5)
+    st_sess = ParagraphStyle("cse", parent=styles["Normal"], fontSize=6.5, leading=8.5)
+
+    CARD_W = 88 * mm
+
+    def build_card(stu):
+        head_txt = []
+        if school.get("name"):
+            head_txt.append(Paragraph(school["name"].upper(), st_school))
+        if school.get("address"):
+            head_txt.append(Paragraph(school["address"], st_addr))
+        if not head_txt:
+            head_txt.append(Paragraph("CBT UJIAN ONLINE", st_school))
+        logo = _sized_logo(school.get("logo_path"), 12)
+        if logo:
+            head = Table([[logo, head_txt]], colWidths=[14 * mm, CARD_W - 22 * mm])
+            head.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+                                      ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                      ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+                                      ("TOPPADDING", (0, 0), (-1, -1), 0),
+                                      ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+        else:
+            head = Table([[head_txt]], colWidths=[CARD_W - 8 * mm])
+            head.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                      ("TOPPADDING", (0, 0), (-1, -1), 0), ("BOTTOMPADDING", (0, 0), (-1, -1), 0)]))
+
+        band = Table([[Paragraph("KARTU PESERTA UJIAN", st_title)]], colWidths=[CARD_W - 8 * mm])
+        band.setStyle(TableStyle([("BACKGROUND", (0, 0), (-1, -1), green),
+                                  ("TOPPADDING", (0, 0), (-1, -1), 3), ("BOTTOMPADDING", (0, 0), (-1, -1), 3)]))
+
+        ident = Table([
+            [Paragraph("Nama Peserta", st_label), Paragraph("NISN / NIP", st_label)],
+            [Paragraph(stu["name"], st_value), Paragraph(stu.get("identifier") or "-", st_value)],
+            [Paragraph("Kelas", st_label), Paragraph("Akun Login", st_label)],
+            [Paragraph(cls["name"], st_value), Paragraph(stu.get("email", "-"), st_sess)],
+        ], colWidths=[(CARD_W - 8 * mm) * 0.52, (CARD_W - 8 * mm) * 0.48])
+        ident.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 2),
+            ("TOPPADDING", (0, 0), (-1, -1), 1), ("BOTTOMPADDING", (0, 0), (-1, -1), 1),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ]))
+
+        rows = [[Paragraph("<b>Sesi Ujian</b>", st_sess), Paragraph("<b>Jadwal</b>", st_sess),
+                 Paragraph("<b>Durasi</b>", st_sess)]]
+        for s in sessions[:5]:
+            rows.append([
+                Paragraph(f"{s['title']}<br/><font size=5 color='#7a7a70'>{pkg_titles.get(s['id'], '-')}</font>", st_sess),
+                Paragraph(fmt_local(s["start_time"]).replace(" WIB", ""), st_sess),
+                Paragraph(f"{s.get('duration_minutes', 0)}'", st_sess),
+            ])
+        if len(sessions) > 5:
+            rows.append([Paragraph(f"+{len(sessions) - 5} sesi lainnya", st_small), "", ""])
+        if not sessions:
+            rows.append([Paragraph("Belum ada sesi terjadwal", st_small), "", ""])
+        w = CARD_W - 8 * mm
+        sess_t = Table(rows, colWidths=[w * 0.5, w * 0.36, w * 0.14])
+        sess_t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#f1f1ea")),
+            ("TEXTCOLOR", (0, 0), (-1, 0), green),
+            ("GRID", (0, 0), (-1, -1), 0.25, lightline),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("ALIGN", (2, 0), (2, -1), "CENTER"),
+            ("TOPPADDING", (0, 0), (-1, -1), 2), ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+        ]))
+
+        foot = Table([[Paragraph("Kartu ini wajib dibawa saat ujian.", st_small),
+                       Paragraph("Tanda tangan peserta<br/><br/>__________________", st_small)]],
+                     colWidths=[w * 0.55, w * 0.45])
+        foot.setStyle(TableStyle([("LEFTPADDING", (0, 0), (-1, -1), 0), ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+                                  ("TOPPADDING", (0, 0), (-1, -1), 2), ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                  ("ALIGN", (1, 0), (1, 0), "RIGHT")]))
+
+        inner = [head, Spacer(1, 3), band, Spacer(1, 3), ident, Spacer(1, 3), sess_t, Spacer(1, 2), foot]
+        card = Table([[inner]], colWidths=[CARD_W], rowHeights=[68 * mm])
+        card.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.7, green),
+            ("LINEBEFORE", (0, 0), (0, 0), 2.5, terra),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm), ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+            ("TOPPADDING", (0, 0), (-1, -1), 3 * mm), ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
+        ]))
+        return card
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=12 * mm, bottomMargin=12 * mm,
+                            leftMargin=10 * mm, rightMargin=10 * mm,
+                            title=f"Kartu Peserta {cls['name']}")
+    elems = []
+    if not students:
+        elems.append(Paragraph(f"Belum ada siswa di kelas {cls['name']}.", styles["Normal"]))
+    else:
+        pairs = [students[i:i + 2] for i in range(0, len(students), 2)]
+        for pi, pair in enumerate(pairs):
+            cards = [build_card(s) for s in pair]
+            if len(cards) == 1:
+                cards.append("")
+            grid = Table([cards], colWidths=[CARD_W, CARD_W])
+            grid.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"),
+                                      ("LEFTPADDING", (0, 0), (-1, -1), 0),
+                                      ("RIGHTPADDING", (0, 0), (-1, -1), 2 * mm),
+                                      ("TOPPADDING", (0, 0), (-1, -1), 0),
+                                      ("BOTTOMPADDING", (0, 0), (-1, -1), 4 * mm)]))
+            elems.append(KeepTogether(grid))
+    doc.build(elems)
+    buf.seek(0)
+    fname = f"kartu-peserta-{cls['name']}.pdf".replace(" ", "_").replace("/", "-")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
 # ------------------------------------------------------------------ SESSION RESULT EXPORT (Excel)
 @api_router.get("/export/session/{session_id}/xlsx")
 async def export_session_results(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
@@ -1996,8 +2229,16 @@ async def get_school(user: dict = Depends(get_current_user)):
 
 @api_router.put("/settings/school")
 async def set_school(body: SchoolBody, user: dict = Depends(require_roles("admin"))):
-    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **body.model_dump()}}, upsert=True)
-    return body.model_dump()
+    """Patch identitas sekolah — field yang tidak dikirim tidak menghapus data lama."""
+    current = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    data = body.model_dump()
+    merged = {"key": "school", "name": data.get("name") or "", "address": data.get("address") or "",
+              "logo_path": data.get("logo_path")}
+    # theme_color is optional in some clients; keep the stored value when it is omitted
+    merged["theme_color"] = data.get("theme_color") or current.get("theme_color")
+    await db.settings.update_one({"key": "school"}, {"$set": merged}, upsert=True)
+    merged.pop("key", None)
+    return merged
 
 
 def _logo_flowable(logo_path):

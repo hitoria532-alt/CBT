@@ -199,16 +199,20 @@ export default function Accounts() {
           <DialogHeader><DialogTitle>Impor Akun dari Excel / CSV</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
             <div className="rounded-md bg-muted/40 border border-border p-4 text-sm space-y-2">
-              <p className="font-medium">Kolom yang dibutuhkan</p>
+              <p className="font-medium">Kolom yang dikenali</p>
               <p className="text-muted-foreground">
                 <code className="text-foreground">nama</code>, <code className="text-foreground">email</code>,{" "}
                 <code className="text-foreground">password</code>, <code className="text-foreground">role</code> (siswa/guru/admin),{" "}
-                <code className="text-foreground">identifier</code> (NISN/NIP)
+                <code className="text-foreground">identifier</code> (NISN/NIP), <code className="text-foreground">kelas</code>
               </p>
-              <p className="text-xs text-muted-foreground">
-                Email yang sudah terdaftar akan diperbarui (nama, role, NISN/NIP, dan password bila diisi).
-                Format file: .xlsx, .xls, atau .csv
-              </p>
+              <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
+                <li>Nama kolom alternatif ikut dikenali: <i>nama_lengkap, nis, nisn, nip, rombel, class</i></li>
+                <li><b>kelas</b>: siswa langsung dimasukkan ke rombel — kelas dibuat otomatis bila belum ada</li>
+                <li>Email kosong pada siswa dibuat otomatis dari NISN (<i>nisn@siswa.sekolah.id</i>)</li>
+                <li>Password kosong pada akun baru memakai NISN, atau <i>siswa123</i>/<i>guru123</i></li>
+                <li>Email yang sudah terdaftar akan diperbarui, bukan diduplikasi</li>
+                <li>Format file: .xlsx, .xls, atau .csv</li>
+              </ul>
             </div>
             <Button variant="outline" onClick={downloadTemplate} className="w-full" data-testid="download-user-template-btn">
               <FileDown className="h-4 w-4 mr-2" />Unduh Template
@@ -226,6 +230,11 @@ export default function Accounts() {
                   <span className="font-semibold text-primary">{importResult.imported}</span> akun baru ·{" "}
                   <span className="font-semibold">{importResult.updated}</span> diperbarui
                 </p>
+                {importResult.notes?.length > 0 && (
+                  <div className="max-h-32 overflow-y-auto text-xs text-muted-foreground space-y-1">
+                    {importResult.notes.map((nt, i) => <p key={i}>{nt}</p>)}
+                  </div>
+                )}
                 {importResult.errors?.length > 0 && (
                   <div className="max-h-40 overflow-y-auto text-xs text-destructive space-y-1">
                     {importResult.errors.map((er, i) => <p key={i}>{er}</p>)}
