@@ -98,7 +98,12 @@ export default function ExamView() {
         <div className="max-w-3xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <div className="min-w-0">
             <p className="text-sm font-medium truncate">{data.session.title}</p>
-            <p className="text-xs text-muted-foreground">{answered}/{questions.length} terjawab</p>
+            <p className="text-xs text-muted-foreground">
+              {answered}/{questions.length} terjawab
+              {(data.session.max_attempts || 1) > 1 && (
+                <span data-testid="attempt-indicator"> · Percobaan {data.attempt_number}/{data.session.max_attempts}</span>
+              )}
+            </p>
           </div>
           <div className={`flex items-center gap-2 px-3 py-1.5 rounded-md font-mono text-lg tracking-widest ${critical ? "bg-destructive/10 text-destructive animate-pulse" : "bg-muted text-foreground"}`} data-testid="exam-timer">
             <Clock className="h-4 w-4" />{fmtTime(remaining)}

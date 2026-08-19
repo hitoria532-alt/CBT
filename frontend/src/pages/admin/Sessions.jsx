@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, CalendarClock } from "lucide-react";
 import api, { apiError } from "../../lib/api";
-import { fmtDateTime, toLocalInput, fromLocalInput, STATUS_LABEL } from "../../lib/utils2";
+import { fmtDateTime, toLocalInput, fromLocalInput, STATUS_LABEL, POLICY_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Textarea } from "../../components/ui/textarea";
@@ -16,7 +16,7 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75, class_ids: [], announcement: "" };
+const EMPTY = { title: "", package_id: "", start_time: "", end_time: "", duration_minutes: 60, kkm: 75, class_ids: [], announcement: "", max_attempts: 1, score_policy: "tertinggi" };
 
 const statusColor = {
   akan_datang: "bg-secondary/20 text-secondary-foreground",
@@ -44,7 +44,8 @@ export default function Sessions() {
     setEditing(s);
     setForm({ title: s.title, package_id: s.package_id,
       start_time: toLocalInput(s.start_time), end_time: toLocalInput(s.end_time),
-      duration_minutes: s.duration_minutes, kkm: s.kkm, class_ids: s.class_ids || [], announcement: s.announcement || "" });
+      duration_minutes: s.duration_minutes, kkm: s.kkm, class_ids: s.class_ids || [], announcement: s.announcement || "",
+      max_attempts: s.max_attempts || 1, score_policy: s.score_policy || "tertinggi" });
     setOpen(true);
   };
 
@@ -59,11 +60,12 @@ export default function Sessions() {
       title: form.title, package_id: form.package_id,
       start_time: fromLocalInput(form.start_time), end_time: fromLocalInput(form.end_time),
       duration_minutes: Number(form.duration_minutes), kkm: Number(form.kkm), class_ids: form.class_ids, announcement: form.announcement,
+      max_attempts: Math.max(1, Number(form.max_attempts) || 1), score_policy: form.score_policy,
     };
     try {
       if (editing) await api.put(`/sessions/${editing.id}`, payload);
       else await api.post("/sessions", payload);
-      toast.success("Sesi disimpan"); setOpen(false); load();
+      toast.success("Sesi disimpan"); setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -99,6 +101,10 @@ export default function Sessions() {
                   <p>Paket: <span className="text-foreground">{s.package_title}</span> · {s.question_count} soal</p>
                   <p>{fmtDateTime(s.start_time)} — {fmtDateTime(s.end_time)}</p>
                   <p>Durasi {s.duration_minutes} menit · KKM {s.kkm}</p>
+                  <p>
+                    Percobaan: <span className="text-foreground">{(s.max_attempts || 1) > 1 ? `${s.max_attempts}x (ujian ulang aktif)` : "1x"}</span>
+                    {(s.max_attempts || 1) > 1 && <> · Nilai dipakai: <span className="text-foreground">{POLICY_LABEL[s.score_policy || "tertinggi"]}</span></>}
+                  </p>
                   <p>Kelas: {s.class_names?.length ? s.class_names.join(", ") : "Semua siswa"}</p>
                 </div>
               </div>
@@ -111,7 +117,7 @@ export default function Sessions() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{editing ? "Edit Sesi" : "Tambah Sesi Ujian"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -148,6 +154,26 @@ export default function Sessions() {
                 <Input type="number" min="0" max="100" value={form.kkm} onChange={(e) => setForm({ ...form, kkm: e.target.value })} />
               </div>
             </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label>Maks Percobaan</Label>
+                <Input type="number" min="1" max="10" value={form.max_attempts}
+                  onChange={(e) => setForm({ ...form, max_attempts: e.target.value })} data-testid="session-max-attempts-input" />
+                <p className="text-xs text-muted-foreground">1 = sekali kerjakan. Lebih dari 1 = siswa boleh ujian ulang.</p>
+              </div>
+              <div className="space-y-2">
+                <Label>Nilai yang Dipakai</Label>
+                <Select value={form.score_policy} onValueChange={(v) => setForm({ ...form, score_policy: v })}>
+                  <SelectTrigger data-testid="session-policy-select"><SelectValue /></SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="tertinggi">Nilai tertinggi</SelectItem>
+                    <SelectItem value="terakhir">Nilai percobaan terakhir</SelectItem>
+                    <SelectItem value="rata">Rata-rata semua percobaan</SelectItem>
+                  </SelectContent>
+                </Select>
+                <p className="text-xs text-muted-foreground">Dipakai untuk rapor, rekap, dan peringkat.</p>
+              </div>
+            </div>
             <div className="space-y-2">
               <Label>Kelas Peserta {form.class_ids.length === 0 && <span className="text-muted-foreground font-normal">(kosong = semua siswa)</span>}</Label>
               {classes.length === 0 ? (
@@ -169,7 +195,7 @@ export default function Sessions() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-session-btn">Simpan</Button>
           </DialogFooter>
         </DialogContent>

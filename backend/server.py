@@ -251,6 +251,9 @@ class PackageBody(BaseModel):
     is_public: bool = False
 
 
+SCORE_POLICIES = ("tertinggi", "terakhir", "rata")
+
+
 class Session(BaseModel):
     id: str = Field(default_factory=new_id)
     title: str
@@ -261,6 +264,8 @@ class Session(BaseModel):
     kkm: float = 75.0
     class_ids: List[str] = []
     announcement: Optional[str] = ""
+    max_attempts: int = 1               # berapa kali siswa boleh mengerjakan
+    score_policy: str = "tertinggi"     # tertinggi | terakhir | rata
     created_at: str = Field(default_factory=now_iso)
 
 
@@ -273,6 +278,8 @@ class SessionBody(BaseModel):
     kkm: float = 75.0
     class_ids: List[str] = []
     announcement: Optional[str] = ""
+    max_attempts: int = 1
+    score_policy: str = "tertinggi"
 
 
 class SchoolClass(BaseModel):
@@ -547,7 +554,77 @@ def normalize_session_times(data: dict) -> dict:
     for field in ("start_time", "end_time"):
         if data.get(field):
             data[field] = parse_dt(data[field]).isoformat()
+    try:
+        data["max_attempts"] = max(1, int(data.get("max_attempts") or 1))
+    except (TypeError, ValueError):
+        data["max_attempts"] = 1
+    if data.get("score_policy") not in SCORE_POLICIES:
+        data["score_policy"] = "tertinggi"
     return data
+
+
+# ------------------------------------------------------------------ ATTEMPTS (retake support)
+FINISHED = {"$in": ["selesai", "menunggu_koreksi"]}
+COUNTED_ONLY = {"counted": {"$ne": False}}  # legacy attempts (no field) still count
+
+
+STATUS_ID = {
+    "berlangsung": "Berlangsung",
+    "menunggu_koreksi": "Menunggu Koreksi",
+    "selesai": "Selesai",
+}
+
+
+def fmt_local(iso: str, tz_hours: int = 7) -> str:
+    """Format an ISO timestamp for Indonesian reports (default WIB / UTC+7)."""
+    try:
+        dt = parse_dt(iso) + timedelta(hours=tz_hours)
+    except Exception:
+        return str(iso or "-")
+    bulan = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+    return f"{dt.day:02d} {bulan[dt.month - 1]} {dt.year} {dt.hour:02d}:{dt.minute:02d} WIB"
+
+
+def att_score(a: dict):
+    """Score used for grades/ranking: effective_score honours the session score policy."""
+    val = a.get("effective_score")
+    return a.get("score") if val is None else val
+
+
+async def recount_attempts(session_id: str, student_id: str) -> None:
+    """Mark exactly one attempt of a student as the counted one, per session policy.
+
+    - tertinggi : attempt with the highest score counts
+    - terakhir  : the most recent submission counts
+    - rata      : most recent submission counts, carrying the average of all attempts
+    """
+    attempts = await db.attempts.find(
+        {"session_id": session_id, "student_id": student_id, "status": {"$ne": "berlangsung"}},
+        {"_id": 0, "id": 1, "score": 1, "submitted_at": 1},
+    ).to_list(200)
+    if not attempts:
+        return
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0, "score_policy": 1})
+    policy = (session or {}).get("score_policy") or "tertinggi"
+    ordered = sorted(attempts, key=lambda a: a.get("submitted_at") or "")
+    scored = [a for a in ordered if a.get("score") is not None]
+
+    if policy == "terakhir":
+        chosen, effective = ordered[-1], None
+    elif policy == "rata":
+        chosen = ordered[-1]
+        effective = round(sum(a["score"] for a in scored) / len(scored), 2) if scored else None
+    else:  # tertinggi
+        chosen = max(scored, key=lambda a: a["score"]) if scored else ordered[-1]
+        effective = None
+
+    for a in ordered:
+        is_chosen = a["id"] == chosen["id"]
+        await db.attempts.update_one({"id": a["id"]}, {"$set": {
+            "counted": is_chosen,
+            "effective_score": effective if is_chosen else None,
+            "score_policy": policy,
+        }})
 
 
 async def enrich_session(s: dict) -> dict:
@@ -579,8 +656,17 @@ async def list_sessions(user: dict = Depends(get_current_user)):
             targets = s.get("class_ids") or []
             if targets and not (set(targets) & my_class_ids):
                 continue
-            att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]}, {"_id": 0})
-            s["attempt_status"] = att["status"] if att else None
+            att = await db.attempts.find_one(
+                {"session_id": s["id"], "student_id": user["id"], "status": "berlangsung"}, {"_id": 0})
+            finished = await db.attempts.count_documents(
+                {"session_id": s["id"], "student_id": user["id"], "status": {"$ne": "berlangsung"}})
+            max_att = int(s.get("max_attempts") or 1)
+            s["attempt_status"] = att["status"] if att else ("selesai" if finished else None)
+            s["attempts_used"] = finished
+            s["max_attempts"] = max_att
+            s["attempts_left"] = max(0, max_att - finished)
+            s["has_ongoing"] = bool(att)
+            s["score_policy"] = s.get("score_policy") or "tertinggi"
             visible.append(s)
         return visible
     else:
@@ -601,7 +687,13 @@ async def create_session(body: SessionBody, user: dict = Depends(require_roles("
 @api_router.put("/sessions/{sid}")
 async def update_session(sid: str, body: SessionBody, user: dict = Depends(require_roles("admin", "guru"))):
     data = normalize_session_times(body.model_dump())
+    prev = await db.sessions.find_one({"id": sid}, {"_id": 0, "score_policy": 1})
     await db.sessions.update_one({"id": sid}, {"$set": data})
+    if (prev or {}).get("score_policy") != data.get("score_policy"):
+        # policy changed -> re-decide which attempt counts for every participant
+        students = await db.attempts.distinct("student_id", {"session_id": sid})
+        for st in students:
+            await recount_attempts(sid, st)
     return await db.sessions.find_one({"id": sid}, {"_id": 0})
 
 
@@ -633,9 +725,15 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     if session["status"] == "selesai":
         raise HTTPException(status_code=400, detail="Sesi sudah berakhir")
 
-    attempt = await db.attempts.find_one({"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
-    if attempt and attempt["status"] != "berlangsung":
-        raise HTTPException(status_code=400, detail="Anda sudah mengerjakan sesi ini")
+    attempt = await db.attempts.find_one(
+        {"session_id": body.session_id, "student_id": user["id"], "status": "berlangsung"}, {"_id": 0})
+    finished = await db.attempts.count_documents(
+        {"session_id": body.session_id, "student_id": user["id"], "status": {"$ne": "berlangsung"}})
+    max_attempts = int(session.get("max_attempts") or 1)
+    if not attempt and finished >= max_attempts:
+        detail = ("Anda sudah mengerjakan sesi ini" if max_attempts == 1 else
+                  f"Batas percobaan tercapai ({finished}/{max_attempts})")
+        raise HTTPException(status_code=400, detail=detail)
 
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
     questions = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
@@ -658,6 +756,7 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
             "package_id": session["package_id"], "answers": {}, "status": "berlangsung",
             "score": None, "started_at": now_iso(), "submitted_at": None,
             "needs_grading": False, "question_order": order_ids, "option_perm": option_perm,
+            "attempt_number": finished + 1, "counted": False, "effective_score": None,
         }
         await db.attempts.insert_one(dict(attempt))
 
@@ -668,7 +767,10 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     return {
         "attempt_id": attempt["id"],
         "session": {"id": session["id"], "title": session["title"],
-                    "duration_minutes": session["duration_minutes"], "end_time": session["end_time"]},
+                    "duration_minutes": session["duration_minutes"], "end_time": session["end_time"],
+                    "max_attempts": max_attempts, "score_policy": session.get("score_policy", "tertinggi")},
+        "attempt_number": attempt.get("attempt_number", 1),
+        "attempts_left": max(0, max_attempts - finished - (0 if attempt.get("submitted_at") else 1)),
         "started_at": attempt["started_at"],
         "answers": attempt.get("answers", {}),
         "questions": display,
@@ -755,18 +857,19 @@ async def finalize_attempt(attempt: dict, answers: dict) -> dict:
         "submitted_at": now_iso(),
     }
     await db.attempts.update_one({"id": attempt["id"]}, {"$set": update})
+    await recount_attempts(attempt["session_id"], attempt["student_id"])
     return update
 
 
 @api_router.post("/exam/submit")
 async def submit_exam(body: SubmitBody, user: dict = Depends(require_roles("siswa"))):
-    attempt = await db.attempts.find_one({"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
+    attempt = await db.attempts.find_one(
+        {"session_id": body.session_id, "student_id": user["id"], "status": "berlangsung"}, {"_id": 0})
     if not attempt:
         raise HTTPException(status_code=404, detail="Percobaan tidak ditemukan")
-    if attempt["status"] != "berlangsung":
-        raise HTTPException(status_code=400, detail="Sesi sudah dikumpulkan")
     update = await finalize_attempt(attempt, body.answers)
-    return {"status": update["status"], "score": update["score"], "needs_grading": update["needs_grading"]}
+    return {"status": update["status"], "score": update["score"],
+            "needs_grading": update["needs_grading"], "attempt_number": attempt.get("attempt_number", 1)}
 
 
 @api_router.post("/exam/save/{session_id}")
@@ -781,6 +884,7 @@ async def save_progress(session_id: str, body: dict, user: dict = Depends(requir
 @api_router.get("/results/session/{session_id}")
 async def results_by_session(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
     attempts = await db.attempts.find({"session_id": session_id}, {"_id": 0}).to_list(2000)
+    attempts.sort(key=lambda a: (a.get("student_name", "").lower(), a.get("attempt_number", 1)))
     session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
     return {"session": session, "attempts": attempts}
 
@@ -794,6 +898,9 @@ async def my_results(user: dict = Depends(require_roles("siswa"))):
         s = await db.sessions.find_one({"id": a["session_id"]}, {"_id": 0})
         a["session_title"] = s["title"] if s else "-"
         a["kkm"] = s.get("kkm", 75) if s else 75
+        a["max_attempts"] = int(s.get("max_attempts") or 1) if s else 1
+        a["score_policy"] = (s.get("score_policy") if s else None) or "tertinggi"
+        a["final_score"] = att_score(a)
     return attempts
 
 
@@ -834,6 +941,7 @@ async def grade_essay(attempt_id: str, body: GradeEssayBody, user: dict = Depend
         "earned": earned, "total_possible": total,
         "status": "menunggu_koreksi" if needs_grading else "selesai",
     }})
+    await recount_attempts(attempt["session_id"], attempt["student_id"])
     return {"score": score, "needs_grading": needs_grading}
 
 
@@ -873,11 +981,12 @@ async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "gu
 
 # ------------------------------------------------------------------ QUESTION IMPORT
 IMPORT_TEMPLATE = (
-    "type,text,option_a,option_b,option_c,option_d,correct,weight,category,image_url\n"
-    "pg,Berapa hasil 5 + 3?,6,7,8,9,C,1,Matematika,\n"
-    "truefalse,Matahari terbit dari timur.,,,,,benar,1,IPA,\n"
-    "essay,Jelaskan proses fotosintesis.,,,,,,2,IPA,\n"
-    "pg,Perhatikan gambar berikut.,A,B,C,D,A,1,IPA,https://contoh.com/gambar.png\n"
+    "type,text,option_a,option_b,option_c,option_d,option_e,correct,weight,category,image_url\n"
+    "pg,Berapa hasil 5 + 3?,6,7,8,9,10,C,1,Matematika,\n"
+    "pg,Ibu kota Provinsi Jawa Barat adalah ...,Bandung,Semarang,Surabaya,Medan,Bogor,A,1,IPS,\n"
+    "truefalse,Matahari terbit dari timur.,,,,,,benar,1,IPA,\n"
+    "essay,Jelaskan proses fotosintesis.,,,,,,,2,IPA,\n"
+    "pg,Perhatikan gambar berikut.,A,B,C,D,E,A,1,IPA,https://contoh.com/gambar.png\n"
 )
 
 
@@ -908,7 +1017,7 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
 
     imported = 0
     errors = []
-    letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3"}
+    letter_idx = {"a": "0", "b": "1", "c": "2", "d": "3", "e": "4"}
     for i, row in df.iterrows():
         rownum = i + 2
         try:
@@ -938,7 +1047,7 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
 
             options, correct = [], None
             if qtype == "pg":
-                for col in ("option_a", "option_b", "option_c", "option_d"):
+                for col in ("option_a", "option_b", "option_c", "option_d", "option_e"):
                     v = row.get(col, "")
                     v = "" if (v is None or str(v).lower() == "nan") else str(v).strip()
                     if v:
@@ -950,6 +1059,9 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
                     correct = raw_c
                 else:
                     errors.append(f"Baris {rownum}: kunci PG tidak valid")
+                    continue
+                if int(correct) >= len(options):
+                    errors.append(f"Baris {rownum}: kunci '{raw_c.upper()}' menunjuk opsi yang kosong")
                     continue
             elif qtype == "truefalse":
                 raw_c = str(row.get("correct", "")).strip().lower()
@@ -971,6 +1083,97 @@ async def import_questions(file: UploadFile = File(...), user: dict = Depends(re
     return {"imported": imported, "errors": errors}
 
 
+# ------------------------------------------------------------------ USER IMPORT (Excel/CSV)
+USER_IMPORT_TEMPLATE = (
+    "nama,email,password,role,identifier\n"
+    "Ani Siswa,ani@sekolah.id,siswa123,siswa,1001\n"
+    "Budi Siswa,budi@sekolah.id,siswa123,siswa,1002\n"
+    "Pak Rudi,rudi@sekolah.id,guru123,guru,G-01\n"
+)
+
+ROLE_ALIASES = {
+    "siswa": "siswa", "murid": "siswa", "student": "siswa",
+    "guru": "guru", "teacher": "guru", "pengajar": "guru",
+    "admin": "admin", "administrator": "admin",
+}
+
+
+@api_router.get("/users/import-template")
+async def user_import_template(user: dict = Depends(require_roles("admin"))):
+    return StreamingResponse(
+        io.BytesIO(USER_IMPORT_TEMPLATE.encode("utf-8")),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=template_akun.csv"},
+    )
+
+
+def _cell(row, *keys, default=""):
+    """Read the first present column among aliases, tolerating NaN/blank cells."""
+    for k in keys:
+        if k in row:
+            v = row.get(k)
+            if v is None:
+                continue
+            s = str(v).strip()
+            if s and s.lower() != "nan":
+                return s
+    return default
+
+
+@api_router.post("/users/import")
+async def import_users(file: UploadFile = File(...), user: dict = Depends(require_roles("admin"))):
+    raw = await file.read()
+    name = (file.filename or "").lower()
+    try:
+        if name.endswith(".xlsx") or name.endswith(".xls"):
+            df = pd.read_excel(io.BytesIO(raw), dtype=str)
+        else:
+            df = pd.read_csv(io.BytesIO(raw), dtype=str)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
+
+    df.columns = [str(c).strip().lower() for c in df.columns]
+    imported, updated, errors = 0, 0, []
+    for i, row in df.iterrows():
+        rownum = i + 2
+        try:
+            full_name = _cell(row, "nama", "name")
+            email = _cell(row, "email", "e-mail").lower()
+            password = _cell(row, "password", "kata_sandi", "sandi")
+            role_raw = _cell(row, "role", "peran", default="siswa").lower()
+            identifier = _cell(row, "identifier", "nis", "nisn", "nip", "nisn/nip")
+            if not full_name or not email:
+                errors.append(f"Baris {rownum}: nama & email wajib diisi")
+                continue
+            if "@" not in email or " " in email:
+                errors.append(f"Baris {rownum}: email '{email}' tidak valid")
+                continue
+            role = ROLE_ALIASES.get(role_raw)
+            if not role:
+                errors.append(f"Baris {rownum}: role '{role_raw}' tidak dikenal (siswa/guru/admin)")
+                continue
+
+            existing = await db.users.find_one({"email": email})
+            if existing:
+                patch = {"name": full_name, "role": role, "identifier": identifier}
+                if password:
+                    patch["password_hash"] = hash_password(password)
+                await db.users.update_one({"email": email}, {"$set": patch})
+                updated += 1
+                continue
+            if not password:
+                errors.append(f"Baris {rownum}: password wajib untuk akun baru ({email})")
+                continue
+            await db.users.insert_one({
+                "email": email, "password_hash": hash_password(password),
+                "name": full_name, "role": role, "identifier": identifier,
+                "created_at": now_iso(),
+            })
+            imported += 1
+        except Exception as e:
+            errors.append(f"Baris {rownum}: {e}")
+
+    return {"imported": imported, "updated": updated, "errors": errors}
 # ------------------------------------------------------------------ RESULT PDF
 @api_router.get("/results/detail/{attempt_id}/pdf")
 async def result_pdf(attempt_id: str, user: dict = Depends(get_current_user)):
@@ -1169,7 +1372,7 @@ async def student_report_pdf(student_id: str, user: dict = Depends(get_current_u
         raise HTTPException(status_code=404, detail="Siswa tidak ditemukan")
 
     attempts = await db.attempts.find(
-        {"student_id": student_id, "status": {"$ne": "berlangsung"}}, {"_id": 0}
+        {"student_id": student_id, "status": {"$ne": "berlangsung"}, **COUNTED_ONLY}, {"_id": 0}
     ).sort("submitted_at", 1).to_list(2000)
     pkgs = await db.packages.find({}, {"_id": 0, "id": 1, "category_id": 1}).to_list(2000)
     pkg_cat = {p["id"]: p.get("category_id") for p in pkgs}
@@ -1183,7 +1386,7 @@ async def student_report_pdf(student_id: str, user: dict = Depends(get_current_u
         s = await db.sessions.find_one({"id": a["session_id"]}, {"_id": 0})
         subj = cat_name.get(pkg_cat.get(a.get("package_id")), "Umum")
         kkm = s.get("kkm", 75) if s else 75
-        sc = a.get("score")
+        sc = att_score(a)
         status = "Lulus" if (sc is not None and sc >= kkm) else ("Belum Lulus" if sc is not None else "Menunggu")
         rows_data.append([s["title"] if s else "-", subj, str(sc) if sc is not None else "-", str(kkm), status])
         if sc is not None:
@@ -1283,13 +1486,13 @@ async def class_report_pdf(class_id: str, user: dict = Depends(require_roles("ad
         if i > 0:
             elems.append(PageBreak())
         sid = str(stu["_id"])
-        attempts = await db.attempts.find({"student_id": sid, "status": {"$ne": "berlangsung"}}, {"_id": 0}).sort("submitted_at", 1).to_list(2000)
+        attempts = await db.attempts.find({"student_id": sid, "status": {"$ne": "berlangsung"}, **COUNTED_ONLY}, {"_id": 0}).sort("submitted_at", 1).to_list(2000)
         rows_data, scores, labels = [], [], []
         for a in attempts:
             s = await db.sessions.find_one({"id": a["session_id"]}, {"_id": 0})
             subj = cat_name.get(pkg_cat.get(a.get("package_id")), "Umum")
             kkm = s.get("kkm", 75) if s else 75
-            sc = a.get("score")
+            sc = att_score(a)
             status = "Lulus" if (sc is not None and sc >= kkm) else ("Belum Lulus" if sc is not None else "Menunggu")
             rows_data.append([s["title"] if s else "-", subj, str(sc) if sc is not None else "-", str(kkm), status])
             if sc is not None:
@@ -1466,8 +1669,10 @@ async def export_class_grades(class_id: str, user: dict = Depends(require_roles(
         row = [i + 1, st["name"], st.get("identifier", "")]
         scores = []
         for s in sessions:
-            att = await db.attempts.find_one({"session_id": s["id"], "student_id": st["id"]}, {"_id": 0})
-            val = att.get("score") if att and att.get("score") is not None else None
+            att = await db.attempts.find_one(
+                {"session_id": s["id"], "student_id": st["id"], "status": {"$ne": "berlangsung"}, **COUNTED_ONLY},
+                {"_id": 0})
+            val = att_score(att) if att else None
             row.append(val if val is not None else "-")
             if val is not None:
                 scores.append(val)
@@ -1494,6 +1699,187 @@ async def export_class_grades(class_id: str, user: dict = Depends(require_roles(
         headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+# ------------------------------------------------------------------ SESSION RESULT EXPORT (Excel)
+@api_router.get("/export/session/{session_id}/xlsx")
+async def export_session_results(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Rekap nilai satu sesi ujian dalam Excel bertema, siap cetak/arsip."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+    from openpyxl.utils import get_column_letter
+
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    await enrich_session(session)
+    pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0}) or {}
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    classes = await db.classes.find({}, {"_id": 0}).to_list(1000)
+    cls_by_student = {}
+    for c in classes:
+        for sid in c.get("student_ids", []):
+            cls_by_student.setdefault(sid, []).append(c["name"])
+
+    attempts = await db.attempts.find({"session_id": session_id}, {"_id": 0}).to_list(5000)
+    attempts.sort(key=lambda a: (a.get("student_name", "").lower(), a.get("attempt_number", 1)))
+    max_att = int(session.get("max_attempts") or 1)
+    kkm = float(session.get("kkm", 75) or 75)
+    policy = session.get("score_policy") or "tertinggi"
+    policy_label = {"tertinggi": "Nilai tertinggi", "terakhir": "Nilai percobaan terakhir",
+                    "rata": "Rata-rata semua percobaan"}.get(policy, policy)
+
+    GREEN, TERRA, LIGHT = "1E3A30", "C0563F", "F1F1EA"
+    thin = Side(style="thin", color="D9D9CF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    center = Alignment(horizontal="center", vertical="center", wrap_text=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Rekap Nilai"
+    ws.sheet_view.showGridLines = False
+    ncols = 10 if max_att > 1 else 8
+    last_col = get_column_letter(ncols)
+
+    def band(row, text, size=14, color=GREEN, bold=True, fill=None, height=None):
+        ws.merge_cells(f"A{row}:{last_col}{row}")
+        c = ws[f"A{row}"]
+        c.value = text
+        c.font = Font(bold=bold, size=size, color="FFFFFF" if fill else color)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        if fill:
+            c.fill = PatternFill("solid", fgColor=fill)
+        if height:
+            ws.row_dimensions[row].height = height
+
+    r = 1
+    if school.get("name"):
+        band(r, school["name"].upper(), size=14, height=22); r += 1
+    if school.get("address"):
+        band(r, school["address"], size=9, bold=False, color="7A7A70"); r += 1
+    band(r, "REKAP NILAI UJIAN", size=15, fill=GREEN, height=26); r += 1
+    band(r, session["title"], size=11, bold=False, color=TERRA); r += 2
+
+    meta = [
+        ("Paket Soal", pkg.get("title", "-"), "Jumlah Soal", len(pkg.get("question_ids", []))),
+        ("Jadwal", f"{fmt_local(session['start_time'])} s/d {fmt_local(session['end_time'])}",
+         "Durasi", f"{session.get('duration_minutes', 0)} menit"),
+        ("KKM", kkm, "Maks Percobaan", f"{max_att}x" + (f" · {policy_label}" if max_att > 1 else "")),
+    ]
+    for label1, val1, label2, val2 in meta:
+        ws.cell(row=r, column=1, value=label1).font = Font(bold=True, size=9, color="7A7A70")
+        ws.merge_cells(start_row=r, start_column=2, end_row=r, end_column=max(2, ncols - 4))
+        ws.cell(row=r, column=2, value=val1).font = Font(size=9)
+        ws.cell(row=r, column=ncols - 3, value=label2).font = Font(bold=True, size=9, color="7A7A70")
+        ws.merge_cells(start_row=r, start_column=ncols - 2, end_row=r, end_column=ncols)
+        ws.cell(row=r, column=ncols - 2, value=val2).font = Font(size=9)
+        r += 1
+    r += 1
+
+    header = ["No", "Nama Siswa", "NISN / NIP", "Kelas"]
+    if max_att > 1:
+        header += ["Percobaan", "Dipakai"]
+    header += ["Status", "Nilai", "KKM", "Keterangan"]
+    header_row = r
+    for i, h in enumerate(header, start=1):
+        c = ws.cell(row=header_row, column=i, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = PatternFill("solid", fgColor=GREEN)
+        c.alignment = center
+        c.border = border
+    ws.row_dimensions[header_row].height = 24
+    r += 1
+
+    counted_scores, passed = [], 0
+    no = 0
+    for a in attempts:
+        is_counted = a.get("counted") is not False
+        sc = att_score(a)
+        if is_counted:
+            no += 1
+            if sc is not None:
+                counted_scores.append(sc)
+                if sc >= kkm:
+                    passed += 1
+        note = "Menunggu koreksi" if sc is None else ("Lulus" if sc >= kkm else "Belum Lulus")
+        row = [no if is_counted else "", a.get("student_name", "-"), a.get("student_identifier") or "-",
+               ", ".join(cls_by_student.get(a.get("student_id"), [])) or "-"]
+        if max_att > 1:
+            row += [a.get("attempt_number", 1), "Ya" if is_counted else "-"]
+        row += [STATUS_ID.get(a.get("status"), a.get("status")), sc if sc is not None else "-", kkm, note]
+        ws.append(row)
+        rr = ws.max_row
+        for i in range(1, ncols + 1):
+            c = ws.cell(row=rr, column=i)
+            c.border = border
+            c.font = Font(size=10, color="000000" if is_counted else "8A8A80")
+            if i != 2:
+                c.alignment = center
+        if rr % 2 == 0:
+            for i in range(1, ncols + 1):
+                if not ws.cell(row=rr, column=i).fill.fgColor.rgb or ws.cell(row=rr, column=i).fill.patternType is None:
+                    ws.cell(row=rr, column=i).fill = PatternFill("solid", fgColor=LIGHT)
+        nilai_cell = ws.cell(row=rr, column=ncols - 2)
+        if sc is not None:
+            nilai_cell.font = Font(bold=True, size=10, color=GREEN if sc >= kkm else TERRA)
+        note_cell = ws.cell(row=rr, column=ncols)
+        if sc is not None:
+            note_cell.font = Font(size=10, color=GREEN if sc >= kkm else TERRA)
+
+    if not attempts:
+        ws.append(["-"] * ncols)
+        ws.merge_cells(start_row=ws.max_row, start_column=1, end_row=ws.max_row, end_column=ncols)
+        c = ws.cell(row=ws.max_row, column=1, value="Belum ada peserta yang mengumpulkan.")
+        c.alignment = center
+        c.font = Font(size=10, italic=True, color="8A8A80")
+
+    # Ringkasan
+    sr = ws.max_row + 2
+    avg = round(sum(counted_scores) / len(counted_scores), 2) if counted_scores else "-"
+    summary = [
+        ("Jumlah Peserta", no),
+        ("Sudah Dinilai", len(counted_scores)),
+        ("Rata-rata Nilai", avg),
+        ("Nilai Tertinggi", max(counted_scores) if counted_scores else "-"),
+        ("Nilai Terendah", min(counted_scores) if counted_scores else "-"),
+        ("Tuntas (≥ KKM)", f"{passed} siswa" + (f" · {round(passed / no * 100)}%" if no else "")),
+        ("Belum Tuntas", f"{max(0, len(counted_scores) - passed)} siswa"),
+    ]
+    ws.merge_cells(start_row=sr, start_column=1, end_row=sr, end_column=3)
+    hc = ws.cell(row=sr, column=1, value="RINGKASAN")
+    hc.font = Font(bold=True, size=10, color="FFFFFF")
+    hc.fill = PatternFill("solid", fgColor=GREEN)
+    hc.alignment = Alignment(horizontal="center")
+    for i, (label, val) in enumerate(summary, start=1):
+        lc = ws.cell(row=sr + i, column=1, value=label)
+        lc.font = Font(size=10, color="7A7A70")
+        lc.border = border
+        ws.merge_cells(start_row=sr + i, start_column=2, end_row=sr + i, end_column=3)
+        vc = ws.cell(row=sr + i, column=2, value=val)
+        vc.font = Font(bold=True, size=10, color=GREEN)
+        vc.border = border
+        ws.cell(row=sr + i, column=3).border = border
+
+    foot = sr + len(summary) + 2
+    ws.merge_cells(start_row=foot, start_column=1, end_row=foot, end_column=ncols)
+    fc = ws.cell(row=foot, column=1,
+                 value=f"Dicetak {fmt_local(now_iso())} · CBT Ujian Online")
+    fc.font = Font(size=8, italic=True, color="9A9A90")
+
+    widths = {"A": 6, "B": 28, "C": 16, "D": 16}
+    for col, w in widths.items():
+        ws.column_dimensions[col].width = w
+    for idx in range(5, ncols + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 14
+    ws.freeze_panes = ws.cell(row=header_row + 1, column=1)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"rekap-nilai-{session['title']}.xlsx".replace(" ", "_").replace("/", "-")
+    return StreamingResponse(
+        buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
 # ------------------------------------------------------------------ DASHBOARD
 @api_router.get("/dashboard/stats")
 async def dashboard_stats(user: dict = Depends(require_roles("admin", "guru"))):
@@ -1502,8 +1888,9 @@ async def dashboard_stats(user: dict = Depends(require_roles("admin", "guru"))):
     questions = await db.questions.count_documents({})
     packages = await db.packages.count_documents({})
     sessions = await db.sessions.count_documents({})
-    attempts = await db.attempts.find({"status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
-    scores = [a["score"] for a in attempts if a.get("score") is not None]
+    attempts = await db.attempts.find({"status": "selesai", **COUNTED_ONLY},
+                                      {"_id": 0, "score": 1, "effective_score": 1}).to_list(5000)
+    scores = [att_score(a) for a in attempts if att_score(a) is not None]
     avg = round(sum(scores) / len(scores), 1) if scores else 0
     pending = await db.attempts.count_documents({"status": "menunggu_koreksi"})
     return {"students": students, "teachers": teachers, "questions": questions,
@@ -1522,8 +1909,9 @@ async def analytics_classes(user: dict = Depends(require_roles("admin", "guru"))
         completed = 0
         if sids:
             attempts = await db.attempts.find(
-                {"student_id": {"$in": sids}, "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
-            scores = [a["score"] for a in attempts if a.get("score") is not None]
+                {"student_id": {"$in": sids}, "status": "selesai", **COUNTED_ONLY},
+                {"_id": 0, "score": 1, "effective_score": 1}).to_list(5000)
+            scores = [att_score(a) for a in attempts if att_score(a) is not None]
             avg = round(sum(scores) / len(scores), 1) if scores else 0
             completed = len(scores)
         result.append({"class_id": c["id"], "name": c["name"], "avg_score": avg,
@@ -1531,8 +1919,9 @@ async def analytics_classes(user: dict = Depends(require_roles("admin", "guru"))
     sessions = await db.sessions.find({}, {"_id": 0}).sort("start_time", 1).to_list(1000)
     trend = []
     for s in sessions:
-        atts = await db.attempts.find({"session_id": s["id"], "status": "selesai"}, {"_id": 0, "score": 1}).to_list(5000)
-        sc = [a["score"] for a in atts if a.get("score") is not None]
+        atts = await db.attempts.find({"session_id": s["id"], "status": "selesai", **COUNTED_ONLY},
+                                      {"_id": 0, "score": 1, "effective_score": 1}).to_list(5000)
+        sc = [att_score(a) for a in atts if att_score(a) is not None]
         if sc:
             trend.append({"session": s["title"][:18], "avg": round(sum(sc) / len(sc), 1)})
     return {"classes": result, "trend": trend}
@@ -1544,12 +1933,13 @@ async def analytics_subjects(user: dict = Depends(require_roles("admin", "guru")
     cats = await db.categories.find({}, {"_id": 0}).to_list(1000)
     pkgs = await db.packages.find({}, {"_id": 0, "id": 1, "category_id": 1}).to_list(2000)
     pkg_cat = {p["id"]: p.get("category_id") for p in pkgs}
-    atts = await db.attempts.find({"status": "selesai"}, {"_id": 0, "score": 1, "package_id": 1}).to_list(20000)
+    atts = await db.attempts.find({"status": "selesai", **COUNTED_ONLY},
+                                  {"_id": 0, "score": 1, "effective_score": 1, "package_id": 1}).to_list(20000)
     agg = {}
     for a in atts:
-        if a.get("score") is None:
+        if att_score(a) is None:
             continue
-        agg.setdefault(pkg_cat.get(a.get("package_id")), []).append(a["score"])
+        agg.setdefault(pkg_cat.get(a.get("package_id")), []).append(att_score(a))
     result = []
     for c in cats:
         sc = agg.get(c["id"], [])
@@ -1680,10 +2070,10 @@ async def compute_class_leaderboard(cls: dict, category_id: str = None) -> list:
     rows = []
     for u in docs:
         uid = str(u["_id"])
-        atts = await db.attempts.find({"student_id": uid, "status": "selesai"},
-                                      {"_id": 0, "score": 1, "package_id": 1}).to_list(5000)
-        scores = [a["score"] for a in atts
-                  if a.get("score") is not None and (pkg_ids is None or a.get("package_id") in pkg_ids)]
+        atts = await db.attempts.find({"student_id": uid, "status": "selesai", **COUNTED_ONLY},
+                                      {"_id": 0, "score": 1, "effective_score": 1, "package_id": 1}).to_list(5000)
+        scores = [att_score(a) for a in atts
+                  if att_score(a) is not None and (pkg_ids is None or a.get("package_id") in pkg_ids)]
         rows.append({
             "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
             "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
@@ -1728,11 +2118,11 @@ async def compute_global_leaderboard(start=None, end=None, category_id=None):
     for u in students:
         uid = str(u["_id"])
         atts = await db.attempts.find(
-            {"student_id": uid, "status": "selesai"},
-            {"_id": 0, "score": 1, "submitted_at": 1, "package_id": 1}).to_list(5000)
+            {"student_id": uid, "status": "selesai", **COUNTED_ONLY},
+            {"_id": 0, "score": 1, "effective_score": 1, "submitted_at": 1, "package_id": 1}).to_list(5000)
         scores = []
         for a in atts:
-            if a.get("score") is None:
+            if att_score(a) is None:
                 continue
             if pkg_ids is not None and a.get("package_id") not in pkg_ids:
                 continue
@@ -1741,7 +2131,7 @@ async def compute_global_leaderboard(start=None, end=None, category_id=None):
                 continue
             if end and (not st or st > end):
                 continue
-            scores.append(a["score"])
+            scores.append(att_score(a))
         rows.append({
             "student_id": uid, "name": u["name"], "identifier": u.get("identifier", ""),
             "classes": cls_by_student.get(uid, []),

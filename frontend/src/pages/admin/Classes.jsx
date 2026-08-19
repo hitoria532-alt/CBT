@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { releaseBodyPointerEvents } from "../../lib/utils2";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Users, Search, Download, FileText } from "lucide-react";
 import api, { apiError } from "../../lib/api";
@@ -44,7 +45,7 @@ export default function Classes() {
     try {
       if (editing) await api.put(`/classes/${editing.id}`, form);
       else await api.post("/classes", form);
-      toast.success("Kelas disimpan"); setOpen(false); load();
+      toast.success("Kelas disimpan"); setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -116,7 +117,7 @@ export default function Classes() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{editing ? "Edit Kelas" : "Tambah Kelas"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -146,7 +147,7 @@ export default function Classes() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-class-btn">Simpan</Button>
           </DialogFooter>
         </DialogContent>

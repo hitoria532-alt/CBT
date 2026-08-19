@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal } from "lucide-react";import api, { apiError } from "../../lib/api";
-import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL, POLICY_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -49,15 +49,28 @@ export default function Results() {
   };
 
   const exportCSV = () => {
-    const rows = [["Nama", "NISN/NIP", "Status", "Nilai", "Waktu Kumpul"]];
+    const rows = [["Nama", "NISN/NIP", "Percobaan", "Dipakai", "Status", "Nilai", "Waktu Kumpul"]];
     data.attempts.forEach((a) => rows.push([
-      a.student_name, a.student_identifier || "-", STATUS_LABEL[a.status] || a.status,
-      a.score ?? "-", fmtDateTime(a.submitted_at),
+      a.student_name, a.student_identifier || "-", a.attempt_number || 1,
+      a.counted === false ? "Tidak" : "Ya", STATUS_LABEL[a.status] || a.status,
+      a.effective_score ?? a.score ?? "-", fmtDateTime(a.submitted_at),
     ]));
     const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
     const a = document.createElement("a");
     a.href = url; a.download = `hasil-${active.title}.csv`; a.click();
+  };
+
+  const exportXlsx = async () => {
+    try {
+      const res = await api.get(`/export/session/${active.id}/xlsx`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const el = document.createElement("a");
+      el.href = url;
+      el.download = `rekap-nilai-${active.title.replace(/\s+/g, "_")}.xlsx`;
+      el.click();
+      toast.success("Rekap nilai Excel diunduh");
+    } catch (e) { toast.error(apiError(e)); }
   };
 
   const downloadPdf = async (attemptId) => {
@@ -80,7 +93,7 @@ export default function Results() {
     try {
       await api.put("/settings/difficulty", { easy_min: Number(thForm.easy_min), medium_min: Number(thForm.medium_min) });
       toast.success("Ambang kesukaran disimpan");
-      setThresholdOpen(false);
+      setThresholdOpen(false); releaseBodyPointerEvents();
       const r = await api.get(`/analytics/session/${active.id}`);
       setAnalytics(r.data);
     } catch (e) { toast.error(apiError(e)); }
@@ -94,7 +107,10 @@ export default function Results() {
           <ArrowLeft className="h-4 w-4" /> Kembali ke daftar hasil
         </button>
         <h1 className="font-heading text-2xl font-semibold mb-1">Koreksi: {grading.student_name}</h1>
-        <p className="text-muted-foreground mb-6">{grading.session_title}</p>
+        <p className="text-muted-foreground mb-6">
+          {grading.session_title}
+          {(grading.attempt_number || 1) > 1 && <span> · Percobaan ke-{grading.attempt_number}</span>}
+        </p>
 
         <div className="space-y-4">
           {grading.details.map((d, i) => (
@@ -179,7 +195,7 @@ export default function Results() {
             ))}
           </div>
         )}
-        <Dialog open={thresholdOpen} onOpenChange={setThresholdOpen}>
+        <Dialog open={thresholdOpen} onOpenChange={(v) => { setThresholdOpen(v); if (!v) releaseBodyPointerEvents(); }}>
           <DialogContent>
             <DialogHeader><DialogTitle>Atur Ambang Kesukaran</DialogTitle></DialogHeader>
             <div className="space-y-4 py-2">
@@ -195,7 +211,7 @@ export default function Results() {
               </div>
             </div>
             <DialogFooter>
-              <Button variant="outline" onClick={() => setThresholdOpen(false)}>Batal</Button>
+              <Button variant="outline" onClick={() => { setThresholdOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
               <Button onClick={saveThreshold} data-testid="save-threshold-btn">Simpan</Button>
             </DialogFooter>
           </DialogContent>
@@ -206,8 +222,12 @@ export default function Results() {
 
   // ---- Session results table
   if (active && data) {
-    const scored = data.attempts.filter((a) => a.score != null);
-    const avg = scored.length ? (scored.reduce((s, a) => s + a.score, 0) / scored.length).toFixed(1) : "-";
+    const maxAtt = data.session?.max_attempts || 1;
+    const counted = data.attempts.filter((a) => a.counted !== false);
+    const scored = counted.filter((a) => (a.effective_score ?? a.score) != null);
+    const avg = scored.length
+      ? (scored.reduce((s, a) => s + (a.effective_score ?? a.score), 0) / scored.length).toFixed(1)
+      : "-";
     return (
       <div data-testid="session-results">
         <button onClick={() => { setActive(null); setData(null); }} className="flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground mb-6">
@@ -216,11 +236,21 @@ export default function Results() {
         <div className="flex items-end justify-between mb-6 gap-4 flex-wrap">
           <div>
             <h1 className="font-heading text-2xl font-semibold">{active.title}</h1>
-            <p className="text-muted-foreground">{data.attempts.length} peserta · rata-rata {avg}</p>
+            <p className="text-muted-foreground">
+              {counted.length} peserta · {data.attempts.length} percobaan · rata-rata {avg}
+            </p>
+            {maxAtt > 1 && (
+              <p className="text-xs text-muted-foreground mt-1" data-testid="session-policy-info">
+                Ujian ulang aktif (maks {maxAtt}x) · Nilai dipakai: {POLICY_LABEL[data.session?.score_policy || "tertinggi"]}
+              </p>
+            )}
           </div>
-          <div className="flex gap-2">
+          <div className="flex gap-2 flex-wrap">
             <Button variant="outline" onClick={openAnalytics} data-testid="analytics-btn"><BarChart3 className="h-4 w-4 mr-2" />Analitik Butir</Button>
-            <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length}><Download className="h-4 w-4 mr-2" />Export CSV</Button>
+            <Button onClick={exportXlsx} disabled={!data.attempts.length} data-testid="export-xlsx-btn">
+              <FileSpreadsheet className="h-4 w-4 mr-2" />Export Excel
+            </Button>
+            <Button variant="outline" onClick={exportCSV} disabled={!data.attempts.length} data-testid="export-csv-btn"><Download className="h-4 w-4 mr-2" />CSV</Button>
           </div>
         </div>
         <div className="bg-card border border-border rounded-md overflow-hidden">
@@ -229,6 +259,7 @@ export default function Results() {
               <TableRow>
                 <TableHead>Nama Siswa</TableHead>
                 <TableHead>NISN/NIP</TableHead>
+                {maxAtt > 1 && <TableHead>Percobaan</TableHead>}
                 <TableHead>Status</TableHead>
                 <TableHead>Nilai</TableHead>
                 <TableHead>Kumpul</TableHead>
@@ -237,11 +268,24 @@ export default function Results() {
             </TableHeader>
             <TableBody>
               {data.attempts.map((a) => (
-                <TableRow key={a.id} data-testid={`result-row-${a.id}`}>
+                <TableRow key={a.id} data-testid={`result-row-${a.id}`} className={a.counted === false ? "opacity-60" : ""}>
                   <TableCell className="font-medium">{a.student_name}</TableCell>
                   <TableCell className="text-muted-foreground">{a.student_identifier || "-"}</TableCell>
+                  {maxAtt > 1 && (
+                    <TableCell>
+                      <span className="text-sm">{a.attempt_number || 1}</span>
+                      {a.counted !== false && (
+                        <Badge className="bg-primary/10 text-primary border-0 text-xs ml-2" data-testid={`counted-badge-${a.id}`}>Dipakai</Badge>
+                      )}
+                    </TableCell>
+                  )}
                   <TableCell><Badge variant="outline">{STATUS_LABEL[a.status] || a.status}</Badge></TableCell>
-                  <TableCell className="font-semibold">{a.score != null ? a.score : "—"}</TableCell>
+                  <TableCell className="font-semibold">
+                    {a.score != null ? a.score : "—"}
+                    {a.effective_score != null && a.effective_score !== a.score && (
+                      <span className="text-xs text-muted-foreground font-normal ml-1">(dipakai {a.effective_score})</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{fmtDateTime(a.submitted_at)}</TableCell>
                   <TableCell className="text-right">
                     <Button size="sm" variant="ghost" onClick={() => downloadPdf(a.id)} data-testid={`pdf-btn-${a.id}`} className="mr-1"><Download className="h-4 w-4" /></Button>
@@ -252,7 +296,7 @@ export default function Results() {
                 </TableRow>
               ))}
               {data.attempts.length === 0 && (
-                <TableRow><TableCell colSpan={6} className="text-center text-muted-foreground py-10">Belum ada peserta.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={maxAtt > 1 ? 7 : 6} className="text-center text-muted-foreground py-10">Belum ada peserta.</TableCell></TableRow>
               )}
             </TableBody>
           </Table>

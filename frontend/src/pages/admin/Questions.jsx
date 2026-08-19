@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from "react";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, FileQuestion, Upload, Download, Image as ImageIcon, X } from "lucide-react";
 import api, { apiError, fileUrl } from "../../lib/api";
-import { QTYPE_LABEL } from "../../lib/utils2";
+import { QTYPE_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -15,7 +15,15 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
 
-const EMPTY = { category_id: "", type: "pg", text: "", options: ["", "", "", ""], correct_answer: "0", weight: 1, image_path: null };
+const MAX_OPTIONS = 5; // A – E
+const blankOptions = () => Array(MAX_OPTIONS).fill("");
+const padOptions = (opts) => {
+  const arr = (opts || []).slice(0, MAX_OPTIONS);
+  while (arr.length < MAX_OPTIONS) arr.push("");
+  return arr;
+};
+
+const EMPTY = { category_id: "", type: "pg", text: "", options: blankOptions(), correct_answer: "0", weight: 1, image_path: null };
 
 export default function Questions() {
   const [items, setItems] = useState([]);
@@ -62,7 +70,7 @@ export default function Questions() {
       const { data } = await api.post("/questions/import", fd, { headers: { "Content-Type": "multipart/form-data" } });
       toast.success(`${data.imported} soal berhasil diimpor`);
       if (data.errors?.length) toast.warning(`${data.errors.length} baris dilewati`);
-      setImportOpen(false); load(); reloadCats();
+      setImportOpen(false); releaseBodyPointerEvents(); load(); reloadCats();
     } catch (err) { toast.error(apiError(err)); }
     finally { setImporting(false); if (fileRef.current) fileRef.current.value = ""; }
   };
@@ -75,7 +83,7 @@ export default function Questions() {
     setEditing(q);
     setForm({
       category_id: q.category_id || "", type: q.type, text: q.text,
-      options: q.options?.length ? q.options : ["", "", "", ""],
+      options: padOptions(q.options),
       correct_answer: q.correct_answer ?? (q.type === "truefalse" ? "true" : "0"),
       weight: q.weight ?? 1,
       image_path: q.image_path || null,
@@ -86,15 +94,25 @@ export default function Questions() {
   const setType = (type) => {
     setForm((f) => ({
       ...f, type,
-      options: type === "pg" ? (f.options.length ? f.options : ["", "", "", ""]) : [],
+      options: type === "pg" ? padOptions(f.options) : [],
       correct_answer: type === "pg" ? "0" : type === "truefalse" ? "true" : null,
     }));
   };
 
   const save = async () => {
+    // Buang opsi kosong di akhir supaya soal bisa punya 2–5 pilihan (A–E)
+    let opts = form.options.map((o) => (o ?? "").trim());
+    while (opts.length && opts[opts.length - 1] === "") opts.pop();
+    if (form.type === "pg") {
+      if (opts.length < 2) return toast.error("Isi minimal 2 opsi jawaban (A dan B)");
+      const emptyIdx = opts.findIndex((o) => o === "");
+      if (emptyIdx !== -1) return toast.error(`Opsi ${String.fromCharCode(65 + emptyIdx)} masih kosong`);
+      if (Number(form.correct_answer) >= opts.length)
+        return toast.error(`Kunci jawaban ${String.fromCharCode(65 + Number(form.correct_answer))} belum diisi`);
+    }
     const payload = {
       category_id: form.category_id || null, type: form.type, text: form.text,
-      options: form.type === "pg" ? form.options.filter((o) => o.trim() !== "" || true) : [],
+      options: form.type === "pg" ? opts : [],
       correct_answer: form.type === "essay" ? null : String(form.correct_answer),
       weight: Number(form.weight) || 1,
       image_path: form.image_path || null,
@@ -103,7 +121,7 @@ export default function Questions() {
     try {
       if (editing) await api.put(`/questions/${editing.id}`, payload);
       else await api.post("/questions", payload);
-      toast.success("Soal disimpan"); setOpen(false); load();
+      toast.success("Soal disimpan"); setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -175,7 +193,7 @@ export default function Questions() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent className="max-w-lg max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{editing ? "Edit Soal" : "Tambah Soal"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -227,16 +245,17 @@ export default function Questions() {
 
             {form.type === "pg" && (
               <div className="space-y-2">
-                <Label>Opsi Jawaban (pilih yang benar)</Label>
+                <Label>Opsi Jawaban A – E (pilih yang benar)</Label>
                 {form.options.map((o, i) => (
                   <div key={i} className="flex items-center gap-2">
                     <input type="radio" name="correct" checked={String(form.correct_answer) === String(i)}
                       onChange={() => setForm({ ...form, correct_answer: String(i) })}
                       className="accent-[hsl(var(--primary))] h-4 w-4" data-testid={`correct-opt-${i}`} />
                     <span className="font-medium w-5">{String.fromCharCode(65 + i)}</span>
-                    <Input value={o} onChange={(e) => setOpt(i, e.target.value)} placeholder={`Opsi ${String.fromCharCode(65 + i)}`} data-testid={`option-input-${i}`} />
+                    <Input value={o} onChange={(e) => setOpt(i, e.target.value)} placeholder={`Opsi ${String.fromCharCode(65 + i)}${i >= 2 ? " (opsional)" : ""}`} data-testid={`option-input-${i}`} />
                   </div>
                 ))}
+                <p className="text-xs text-muted-foreground">Isi minimal 2 opsi. Opsi yang dikosongkan di bagian bawah tidak akan tampil ke siswa.</p>
               </div>
             )}
 
@@ -266,23 +285,24 @@ export default function Questions() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-question-btn">Simpan</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
 
-      <Dialog open={importOpen} onOpenChange={setImportOpen}>
+      <Dialog open={importOpen} onOpenChange={(v) => { setImportOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>Impor Soal Massal</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
             <p className="text-sm text-muted-foreground leading-relaxed">
               Unggah file <b>CSV</b> atau <b>Excel (.xlsx)</b> dengan kolom:
-              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, correct, weight, category, image_url</code>
+              <code className="block bg-muted rounded px-2 py-1 mt-2 text-xs">type, text, option_a, option_b, option_c, option_d, option_e, correct, weight, category, image_url</code>
             </p>
             <ul className="text-xs text-muted-foreground list-disc pl-5 space-y-1">
               <li><b>type</b>: pg / truefalse / essay</li>
-              <li><b>correct</b>: untuk PG isi A/B/C/D · untuk B/S isi benar/salah</li>
+              <li><b>correct</b>: untuk PG isi A/B/C/D/E · untuk B/S isi benar/salah</li>
+              <li><b>option_e</b>: opsional — kosongkan bila soal hanya sampai D</li>
               <li><b>category</b>: nama kategori (dibuat otomatis bila belum ada)</li>
               <li><b>image_url</b>: (opsional) tautan gambar soal, diunduh otomatis</li>
             </ul>

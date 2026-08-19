@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { releaseBodyPointerEvents } from "../../lib/utils2";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, FolderTree } from "lucide-react";
 import api, { apiError } from "../../lib/api";
@@ -27,7 +28,7 @@ export default function Categories() {
       if (editing) await api.put(`/categories/${editing.id}`, form);
       else await api.post("/categories", form);
       toast.success("Kategori disimpan");
-      setOpen(false); load();
+      setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -69,7 +70,7 @@ export default function Categories() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{editing ? "Edit Kategori" : "Tambah Kategori"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -83,7 +84,7 @@ export default function Categories() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-category-btn">Simpan</Button>
           </DialogFooter>
         </DialogContent>

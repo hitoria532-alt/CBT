@@ -32,3 +32,23 @@ export const STATUS_LABEL = {
 
 export const ROLE_LABEL = { admin: "Admin", guru: "Guru", siswa: "Siswa" };
 export const QTYPE_LABEL = { pg: "Pilihan Ganda", truefalse: "Benar / Salah", essay: "Esai" };
+
+export const POLICY_LABEL = {
+  tertinggi: "Nilai tertinggi",
+  terakhir: "Nilai percobaan terakhir",
+  rata: "Rata-rata semua percobaan",
+};
+
+/**
+ * Radix leaves `pointer-events: none` on <body> when a Dialog unmounts while a
+ * Select/Popover inside it was still open, which makes the page feel frozen.
+ * Call this whenever a dialog is closed programmatically.
+ */
+export function releaseBodyPointerEvents() {
+  requestAnimationFrame(() => {
+    if (document.body.style.pointerEvents === "none") {
+      document.body.style.pointerEvents = "";
+    }
+    document.querySelectorAll("[data-radix-popper-content-wrapper]").forEach((el) => el.remove());
+  });
+}

@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { Plus, Pencil, Trash2, Package as PackageIcon, Copy } from "lucide-react";
 import api, { apiError } from "../../lib/api";
-import { QTYPE_LABEL } from "../../lib/utils2";
+import { QTYPE_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -58,7 +58,7 @@ export default function Packages() {
     try {
       if (editing) await api.put(`/packages/${editing.id}`, payload);
       else await api.post("/packages", payload);
-      toast.success("Paket disimpan"); setOpen(false); load();
+      toast.success("Paket disimpan"); setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -122,7 +122,7 @@ export default function Packages() {
         </div>
       )}
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
           <DialogHeader><DialogTitle>{editing ? "Edit Paket" : "Tambah Paket Soal"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -246,7 +246,7 @@ export default function Packages() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-package-btn">Simpan</Button>
           </DialogFooter>
         </DialogContent>

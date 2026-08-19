@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ClipboardList, ChevronRight, FileDown } from "lucide-react";
+import { ClipboardList, ChevronRight, FileDown, RotateCcw } from "lucide-react";
 import api, { apiError } from "../../lib/api";
-import { fmtDateTime, STATUS_LABEL } from "../../lib/utils2";
+import { fmtDateTime, STATUS_LABEL, POLICY_LABEL } from "../../lib/utils2";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { toast } from "sonner";
@@ -41,12 +41,26 @@ export default function StudentResults() {
         <div className="space-y-3">
           {items.map((a) => {
             const passed = a.score != null && a.score >= a.kkm;
+            const multi = (a.max_attempts || 1) > 1;
             return (
               <button key={a.id} onClick={() => nav(`/hasil/${a.id}`)} data-testid={`result-${a.id}`}
                 className="w-full text-left bg-card border border-border rounded-md p-6 flex items-center justify-between gap-4 hover:border-primary/40 hover:bg-primary/5 transition-colors">
                 <div>
-                  <h3 className="font-heading text-lg font-medium">{a.session_title}</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-heading text-lg font-medium">{a.session_title}</h3>
+                    {multi && (
+                      <Badge variant="outline" className="text-xs" data-testid={`attempt-no-${a.id}`}>
+                        <RotateCcw className="h-3 w-3 mr-1" />Percobaan {a.attempt_number || 1}/{a.max_attempts}
+                      </Badge>
+                    )}
+                    {multi && a.counted && (
+                      <Badge className="bg-primary/10 text-primary border-0 text-xs" data-testid={`counted-${a.id}`}>Nilai dipakai</Badge>
+                    )}
+                  </div>
                   <p className="text-sm text-muted-foreground">Dikumpulkan {fmtDateTime(a.submitted_at)}</p>
+                  {multi && a.counted && a.effective_score != null && (
+                    <p className="text-xs text-muted-foreground mt-0.5">{POLICY_LABEL[a.score_policy]} = {a.effective_score}</p>
+                  )}
                   {a.status === "menunggu_koreksi" && <Badge variant="outline" className="mt-2">{STATUS_LABEL.menunggu_koreksi}</Badge>}
                 </div>
                 <div className="flex items-center gap-4">

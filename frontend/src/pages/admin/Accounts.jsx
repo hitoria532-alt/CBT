@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, FileText } from "lucide-react";
+import { Plus, Pencil, Trash2, FileText, Upload, FileDown } from "lucide-react";
 import api, { apiError } from "../../lib/api";
-import { ROLE_LABEL } from "../../lib/utils2";
+import { ROLE_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
@@ -25,6 +25,10 @@ export default function Accounts() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
+  const [importOpen, setImportOpen] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [importResult, setImportResult] = useState(null);
+  const fileRef = useRef(null);
 
   const load = () => api.get("/users").then((r) => setUsers(r.data));
   useEffect(() => { load(); }, []);
@@ -46,7 +50,7 @@ export default function Accounts() {
       } else {
         await api.post("/users", form);
       }
-      toast.success("Akun disimpan"); setOpen(false); load();
+      toast.success("Akun disimpan"); setOpen(false); releaseBodyPointerEvents(); load();
     } catch (e) { toast.error(apiError(e)); }
   };
 
@@ -65,6 +69,30 @@ export default function Accounts() {
   };
 
   const shown = filter === "all" ? users : users.filter((u) => u.role === filter);
+
+  const downloadTemplate = async () => {
+    try {
+      const res = await api.get("/users/import-template", { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a"); a.href = url; a.download = "template_akun.csv"; a.click();
+      toast.success("Template diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
+  const doImport = async (file) => {
+    if (!file) return;
+    setImporting(true); setImportResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await api.post("/users/import", fd, { headers: { "Content-Type": "multipart/form-data" } });
+      setImportResult(res.data);
+      const { imported, updated } = res.data;
+      toast.success(`${imported} akun baru, ${updated} akun diperbarui`);
+      load();
+    } catch (e) { toast.error(apiError(e)); }
+    finally { setImporting(false); if (fileRef.current) fileRef.current.value = ""; }
+  };
 
   const roleColor = { admin: "bg-accent/15 text-accent", guru: "bg-primary/10 text-primary", siswa: "bg-secondary/20 text-secondary-foreground" };
 
@@ -85,6 +113,9 @@ export default function Accounts() {
               <SelectItem value="siswa">Siswa</SelectItem>
             </SelectContent>
           </Select>
+          <Button variant="outline" onClick={() => { setImportResult(null); setImportOpen(true); }} data-testid="import-users-btn">
+            <Upload className="h-4 w-4 mr-2" />Impor Akun
+          </Button>
           <Button onClick={openNew} data-testid="add-user-btn"><Plus className="h-4 w-4 mr-2" />Tambah Akun</Button>
         </div>
       </div>
@@ -123,7 +154,7 @@ export default function Accounts() {
         </Table>
       </div>
 
-      <Dialog open={open} onOpenChange={setOpen}>
+      <Dialog open={open} onOpenChange={(v) => { setOpen(v); if (!v) releaseBodyPointerEvents(); }}>
         <DialogContent>
           <DialogHeader><DialogTitle>{editing ? "Edit Akun" : "Tambah Akun"}</DialogTitle></DialogHeader>
           <div className="space-y-4 py-2">
@@ -158,8 +189,53 @@ export default function Accounts() {
             </div>
           </div>
           <DialogFooter>
-            <Button variant="outline" onClick={() => setOpen(false)}>Batal</Button>
+            <Button variant="outline" onClick={() => { setOpen(false); releaseBodyPointerEvents(); }}>Batal</Button>
             <Button onClick={save} data-testid="save-user-btn">Simpan</Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      <Dialog open={importOpen} onOpenChange={(v) => { setImportOpen(v); if (!v) releaseBodyPointerEvents(); }}>
+        <DialogContent data-testid="import-users-dialog">
+          <DialogHeader><DialogTitle>Impor Akun dari Excel / CSV</DialogTitle></DialogHeader>
+          <div className="space-y-4 py-2">
+            <div className="rounded-md bg-muted/40 border border-border p-4 text-sm space-y-2">
+              <p className="font-medium">Kolom yang dibutuhkan</p>
+              <p className="text-muted-foreground">
+                <code className="text-foreground">nama</code>, <code className="text-foreground">email</code>,{" "}
+                <code className="text-foreground">password</code>, <code className="text-foreground">role</code> (siswa/guru/admin),{" "}
+                <code className="text-foreground">identifier</code> (NISN/NIP)
+              </p>
+              <p className="text-xs text-muted-foreground">
+                Email yang sudah terdaftar akan diperbarui (nama, role, NISN/NIP, dan password bila diisi).
+                Format file: .xlsx, .xls, atau .csv
+              </p>
+            </div>
+            <Button variant="outline" onClick={downloadTemplate} className="w-full" data-testid="download-user-template-btn">
+              <FileDown className="h-4 w-4 mr-2" />Unduh Template
+            </Button>
+            <div className="space-y-2">
+              <Label>Pilih file</Label>
+              <Input ref={fileRef} type="file" accept=".xlsx,.xls,.csv"
+                onChange={(e) => doImport(e.target.files?.[0])} disabled={importing}
+                data-testid="user-import-file-input" />
+              {importing && <p className="text-sm text-muted-foreground">Mengimpor…</p>}
+            </div>
+            {importResult && (
+              <div className="rounded-md border border-border p-4 space-y-2" data-testid="import-result">
+                <p className="text-sm">
+                  <span className="font-semibold text-primary">{importResult.imported}</span> akun baru ·{" "}
+                  <span className="font-semibold">{importResult.updated}</span> diperbarui
+                </p>
+                {importResult.errors?.length > 0 && (
+                  <div className="max-h-40 overflow-y-auto text-xs text-destructive space-y-1">
+                    {importResult.errors.map((er, i) => <p key={i}>{er}</p>)}
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => { setImportOpen(false); releaseBodyPointerEvents(); }}>Tutup</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
