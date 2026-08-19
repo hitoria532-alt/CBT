@@ -1932,6 +1932,122 @@ async def exam_cards_pdf(class_id: str, session_id: Optional[str] = None,
                              headers={"Content-Disposition": f"attachment; filename={fname}"})
 
 
+# ------------------------------------------------------------------ ATTENDANCE (Daftar Hadir)
+@api_router.get("/attendance/session/{session_id}/pdf")
+async def attendance_pdf(session_id: str, class_id: Optional[str] = None,
+                         user: dict = Depends(require_roles("admin", "guru"))):
+    """Daftar hadir ujian per sesi: nomor, nama, NISN, kelas, keterangan, kolom tanda tangan."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0, "title": 1}) or {}
+
+    target_ids = session.get("class_ids") or []
+    if class_id:
+        target_ids = [class_id]
+    classes = await db.classes.find({"id": {"$in": target_ids}} if target_ids else {}, {"_id": 0}).to_list(1000)
+    cls_by_student, student_ids = {}, []
+    for c in classes:
+        for sid in c.get("student_ids", []):
+            cls_by_student.setdefault(sid, []).append(c["name"])
+            if sid not in student_ids:
+                student_ids.append(sid)
+
+    if target_ids:
+        docs = await db.users.find({"_id": {"$in": [ObjectId(s) for s in student_ids]}}).to_list(3000) if student_ids else []
+        scope = ", ".join(c["name"] for c in classes) or "-"
+    else:
+        docs = await db.users.find({"role": "siswa"}).to_list(3000)
+        scope = "Semua siswa"
+    students = sorted(docs, key=lambda u: u["name"].lower())
+
+    attempts = await db.attempts.find({"session_id": session_id}, {"_id": 0, "student_id": 1, "status": 1}).to_list(5000)
+    att_status = {}
+    for a in attempts:
+        prev = att_status.get(a["student_id"])
+        att_status[a["student_id"]] = "berlangsung" if a["status"] == "berlangsung" and prev != "selesai" else \
+            ("selesai" if a["status"] != "berlangsung" else prev or a["status"])
+
+    green = colors.HexColor("#1e3a30")
+    lightline = colors.HexColor("#d9d9cf")
+    styles = getSampleStyleSheet()
+    sub = ParagraphStyle("sub", parent=styles["Normal"], textColor=colors.grey, fontSize=9)
+    cell = ParagraphStyle("cell", parent=styles["Normal"], fontSize=9, leading=11)
+    th = ParagraphStyle("th", parent=styles["Normal"], fontSize=8.5, leading=10,
+                        textColor=colors.white, fontName="Helvetica-Bold", alignment=1)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=15 * mm, bottomMargin=15 * mm,
+                            leftMargin=15 * mm, rightMargin=15 * mm, title=f"Daftar Hadir {session['title']}")
+    elems = await _school_kop(styles, green, sub)
+    elems += [Paragraph("DAFTAR HADIR UJIAN", ParagraphStyle("h", parent=styles["Title"], textColor=green,
+                                                             fontSize=17, spaceAfter=2)),
+              Paragraph("Computer Based Test", ParagraphStyle("subc", parent=sub, alignment=1)),
+              Spacer(1, 6 * mm)]
+
+    info = [["Sesi Ujian", session["title"], "Durasi", f"{session.get('duration_minutes', 0)} menit"],
+            ["Paket Soal", pkg.get("title", "-"), "KKM", str(session.get("kkm", 75))],
+            ["Jadwal", fmt_local(session["start_time"]), "Peserta", f"{len(students)} siswa"],
+            ["Kelas", scope, "Ruang", "................"]]
+    t = Table(info, colWidths=[24 * mm, 78 * mm, 20 * mm, 58 * mm])
+    t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 9), ("TEXTCOLOR", (0, 0), (0, -1), colors.grey),
+                           ("TEXTCOLOR", (2, 0), (2, -1), colors.grey),
+                           ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                           ("LINEBELOW", (0, 0), (-1, -1), 0.3, lightline)]))
+    elems += [t, Spacer(1, 6 * mm)]
+
+    header = [Paragraph("No", th), Paragraph("Nama Peserta", th), Paragraph("NISN / NIP", th),
+              Paragraph("Kelas", th), Paragraph("Keterangan", th), Paragraph("Tanda Tangan", th)]
+    rows = [header]
+    label = {"selesai": "Sudah mengerjakan", "berlangsung": "Sedang mengerjakan"}
+    for i, stu in enumerate(students, start=1):
+        sid = str(stu["_id"])
+        rows.append([
+            Paragraph(str(i), cell),
+            Paragraph(stu["name"], cell),
+            Paragraph(stu.get("identifier") or "-", cell),
+            Paragraph(", ".join(cls_by_student.get(sid, [])) or "-", cell),
+            Paragraph(label.get(att_status.get(sid), "Belum mengerjakan"), cell),
+            Paragraph("", cell),
+        ])
+    if not students:
+        rows.append([Paragraph("-", cell), Paragraph("Belum ada peserta pada sesi ini", cell),
+                     Paragraph("-", cell), Paragraph("-", cell), Paragraph("-", cell), Paragraph("", cell)])
+
+    tbl = Table(rows, colWidths=[10 * mm, 52 * mm, 24 * mm, 24 * mm, 32 * mm, 38 * mm],
+                repeatRows=1, rowHeights=[9 * mm] + [11 * mm] * (len(rows) - 1))
+    tbl.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), green),
+        ("GRID", (0, 0), (-1, -1), 0.4, lightline),
+        ("BOX", (0, 0), (-1, -1), 0.7, green),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+        ("ALIGN", (0, 0), (0, -1), "CENTER"),
+        ("ALIGN", (2, 1), (4, -1), "CENTER"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#f6f6f0")]),
+        ("LEFTPADDING", (0, 0), (-1, -1), 3), ("RIGHTPADDING", (0, 0), (-1, -1), 3),
+    ]))
+    elems += [tbl, Spacer(1, 8 * mm)]
+
+    sign = Table([[Paragraph("Catatan:<br/>Hadir: ......... siswa &nbsp;&nbsp; Tidak hadir: ......... siswa", sub),
+                   Paragraph("Pengawas Ujian<br/><br/><br/>_________________________<br/>NIP. ....................", sub)]],
+                 colWidths=[100 * mm, 80 * mm])
+    sign.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "TOP"), ("ALIGN", (1, 0), (1, 0), "CENTER")]))
+    elems += [sign, Spacer(1, 4 * mm),
+              Paragraph(f"Dicetak {fmt_local(now_iso())} · CBT Ujian Online", sub)]
+
+    doc.build(elems)
+    buf.seek(0)
+    fname = f"daftar-hadir-{session['title']}.pdf".replace(" ", "_").replace("/", "-")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
 # ------------------------------------------------------------------ SESSION RESULT EXPORT (Excel)
 @api_router.get("/export/session/{session_id}/xlsx")
 async def export_session_results(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
@@ -2232,8 +2348,12 @@ async def set_school(body: SchoolBody, user: dict = Depends(require_roles("admin
     """Patch identitas sekolah — field yang tidak dikirim tidak menghapus data lama."""
     current = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
     data = body.model_dump()
-    merged = {"key": "school", "name": data.get("name") or "", "address": data.get("address") or "",
-              "logo_path": data.get("logo_path")}
+    merged = {"key": "school", "name": data.get("name") or "", "address": data.get("address") or ""}
+    # logo_path: None = tidak dikirim (pertahankan), "" = hapus logo
+    if data.get("logo_path") is None:
+        merged["logo_path"] = current.get("logo_path")
+    else:
+        merged["logo_path"] = data["logo_path"] or None
     # theme_color is optional in some clients; keep the stored value when it is omitted
     merged["theme_color"] = data.get("theme_color") or current.get("theme_color")
     await db.settings.update_one({"key": "school"}, {"$set": merged}, upsert=True)

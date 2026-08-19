@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet, ClipboardList } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL, POLICY_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -77,6 +77,16 @@ export default function Results() {
     const res = await api.get(`/results/detail/${attemptId}/pdf`, { responseType: "blob" });
     const url = URL.createObjectURL(res.data);
     const el = document.createElement("a"); el.href = url; el.download = "kartu-hasil.pdf"; el.click();
+  };
+
+  const downloadAttendance = async () => {
+    try {
+      const res = await api.get(`/attendance/session/${active.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const el = document.createElement("a");
+      el.href = url; el.download = `daftar-hadir-${active.title.replace(/\s+/g, "_")}.pdf`; el.click();
+      toast.success("Daftar hadir diunduh");
+    } catch (e) { toast.error(apiError(e)); }
   };
 
   const openAnalytics = async () => {
@@ -247,6 +257,7 @@ export default function Results() {
           </div>
           <div className="flex gap-2 flex-wrap">
             <Button variant="outline" onClick={openAnalytics} data-testid="analytics-btn"><BarChart3 className="h-4 w-4 mr-2" />Analitik Butir</Button>
+            <Button variant="outline" onClick={downloadAttendance} data-testid="attendance-btn"><ClipboardList className="h-4 w-4 mr-2" />Absensi</Button>
             <Button onClick={exportXlsx} disabled={!data.attempts.length} data-testid="export-xlsx-btn">
               <FileSpreadsheet className="h-4 w-4 mr-2" />Export Excel
             </Button>

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, CalendarClock } from "lucide-react";
+import { Plus, Pencil, Trash2, CalendarClock, ClipboardList } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { fmtDateTime, toLocalInput, fromLocalInput, STATUS_LABEL, POLICY_LABEL, releaseBodyPointerEvents } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
@@ -69,6 +69,16 @@ export default function Sessions() {
     } catch (e) { toast.error(apiError(e)); }
   };
 
+  const downloadAttendance = async (s) => {
+    try {
+      const res = await api.get(`/attendance/session/${s.id}/pdf`, { responseType: "blob" });
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = `daftar-hadir-${s.title.replace(/\s+/g, "_")}.pdf`; a.click();
+      toast.success("Daftar hadir diunduh");
+    } catch (e) { toast.error(apiError(e)); }
+  };
+
   const remove = async (s) => {
     if (!window.confirm(`Hapus sesi "${s.title}"?`)) return;
     await api.delete(`/sessions/${s.id}`); toast.success("Sesi dihapus"); load();
@@ -108,9 +118,14 @@ export default function Sessions() {
                   <p>Kelas: {s.class_names?.length ? s.class_names.join(", ") : "Semua siswa"}</p>
                 </div>
               </div>
-              <div className="flex gap-1">
-                <button onClick={() => openEdit(s)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
-                <button onClick={() => remove(s)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
+              <div className="flex items-center gap-2">
+                <Button size="sm" variant="outline" onClick={() => downloadAttendance(s)} data-testid={`attendance-${s.id}`}>
+                  <ClipboardList className="h-4 w-4 mr-1.5" />Absensi
+                </Button>
+                <div className="flex gap-1">
+                  <button onClick={() => openEdit(s)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
+                  <button onClick={() => remove(s)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
+                </div>
               </div>
             </div>
           ))}
