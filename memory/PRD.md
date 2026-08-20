@@ -217,3 +217,83 @@ tetap berjalan di semua perangkat.
   besar). Verified: 10/10 pytest `test_iteration15.py`, total suite **162 passed, 2 skipped**,
   serta E2E UI di viewport HP: gerbang → ujian → pelanggaran 1/3 → 2/3 → kumpul otomatis
   dan guru melihat catatannya.
+
+## Restore from GitHub + Dokumentasi (2026-08-20)
+Repo `hitoria532-alt/CBT` (branch `main`, 16 commits, latest `28c7886`; commit fitur
+terakhir `c54da10` = PG A-E + ekspor Excel + impor siswa + mode ujian ketat) di-clone ulang
+ke `/app` dan kembali online di live preview Emergent.
+
+**Yang harus dibuat ulang (gitignored, tidak ada di repo):**
+- `/app/backend/.env`: `JWT_SECRET` (di-generate baru — token lama tidak valid),
+  `ADMIN_EMAIL=hitoria532@gmail.com`, `ADMIN_PASSWORD=admin123`, `EMERGENT_LLM_KEY`
+  (object storage gambar soal), `WEBHOOK_CRON_SECRET` (cron auto-submit).
+- Data MongoDB: database kosong → di-seed ulang via `python scripts/seed_demo.py`
+  (idempoten): 4 siswa, 1 guru, 3 kategori, 11 soal, 3 paket, 1 kelas, 3 sesi,
+  2 attempt terkoreksi. Rata-rata nilai 87.5.
+
+**Dependensi**: `pip install -r requirements.txt` GAGAL (konflik resolusi antara
+`emergentintegrations==0.2.0` dan wheel `litellm==1.80.0`). Solusi: install hanya paket
+yang kurang dari base image — `reportlab`, `openpyxl`, `pandas`. Frontend: `yarn install`
+sukses (hanya warning resolutions, tidak fatal).
+
+**Verifikasi**: login admin OK, dashboard admin render penuh (statistik + 3 grafik),
+endpoint `/api/dashboard/stats|sessions|packages|questions|classes|categories|analytics/classes`
+semua 200. Object storage init sukses.
+
+**Dokumentasi (PR #1)**: `README.md` lengkap dibuat di branch
+`docs/readme-project-documentation` → PR #1 (https://github.com/hitoria532-alt/CBT/pull/1),
+status open & mergeable clean, 1 file, +560/-1. Berisi Overview Project, Tech Stack
+(frontend/backend/database 9 koleksi/auth/storage), Folder Structure beranotasi,
+Data Flow (4 diagram: request umum, autentikasi, inti ujian & penilaian, impor/unggah),
+Coding Conventions (penamaan berkas/variabel, konvensi API, aturan frontend, gaya desain,
+konvensi Git & testing), plus panduan Setup & menjalankan lokal. Merge dilakukan pemilik repo.
+
+## Implemented (2026-08-20) — Iteration 16: Ujian Susulan
+Permintaan user: "Beri siswa yang absen jadwal ulang khusus tanpa mengganggu sesi kelas lain."
+
+**Desain**: TIDAK membuat sesi baru. Koleksi baru `makeups` menyimpan jendela waktu
+per-siswa untuk sesi yang sudah ada, jadi `start_time`/`end_time` sesi asli tidak berubah
+dan siswa lain di kelas yang sama tetap terblokir.
+
+- **Model**: `MakeupBody` (session_id, student_ids[], start_time, end_time,
+  duration_minutes opsional = null berarti ikut durasi sesi, reason) & `MakeupUpdateBody`.
+  Dokumen menyimpan student_name/identifier + created_by untuk audit.
+- **Endpoint**: `GET /api/makeups/absentees/{session_id}` (deteksi siswa belum
+  menyelesaikan + `reason_hint`), `POST /api/makeups` (massal, upsert per siswa sehingga
+  tidak pernah duplikat), `GET /api/makeups?session_id=`, `GET /api/makeups/summary`
+  (badge count), `GET /api/makeups/me` (siswa), `PUT/DELETE /api/makeups/{id}`.
+- **Helper baru**: `window_status()`, `eligible_student_ids()`, `find_students_by_ids()`,
+  `get_makeup()`, `enrich_makeup()`. Status susulan: akan_datang / berlangsung / selesai /
+  sudah_dikerjakan.
+- **Integrasi**: `GET /api/sessions` untuk siswa membuka kembali sesi yang sudah berakhir
+  bila jendela susulannya aktif (`active_window="susulan"`, `effective_duration`,
+  objek `makeup`); susulan juga memberi hak akses meski siswa di luar kelas target.
+  `POST /api/exam/start` memvalidasi jendela reguler ATAU susulan, memakai durasi &
+  batas waktu susulan, menandai attempt `is_makeup`/`makeup_id`, dan bila attempt lama
+  sudah bernilai maka di-**reset di tempat** (riwayat disimpan di `previous_attempts`)
+  sehingga invarian 1 attempt per (sesi, siswa) tetap terjaga. `/api/notifications`
+  mengirim pemberitahuan susulan. `run_auto_submit` kini memakai
+  `effective_end`/`effective_duration` attempt agar batas waktu susulan dihormati.
+  Cascade: hapus sesi/akun siswa ikut menghapus jadwal susulannya.
+- **Frontend**: komponen baru `components/MakeupDialog.jsx` (dipakai di Sesi Pelaksanaan
+  lewat tombol "Susulan") — daftar susulan terjadwal dengan ubah/batalkan, daftar siswa
+  belum mengerjakan berikut checkbox + "Pilih semua", form mulai/selesai/durasi/alasan.
+  Badge jumlah susulan di kartu sesi. Sisi siswa: kartu bertepi aksen, badge
+  "Ujian Susulan", blok info jadwal + alasan, tombol "Mulai Ujian Susulan"; header
+  ExamView menampilkan "· Susulan". Badge "Susulan" di Hasil & Koreksi dan Hasil Saya,
+  kolom "Jalur" pada ekspor CSV, penanda "(Susulan)" pada ekspor Excel.
+- **Bug ditemukan & diperbaiki**: dokumen `users` tidak punya field `id` (memakai `_id`
+  ObjectId) sehingga daftar absen selalu kosong — diperbaiki lewat `find_students_by_ids()`.
+- **Verified**: `scripts/test_makeup.py` 57/57 PASS; pytest penuh **177 passed / 2 skipped**
+  (162 test lama tetap lulus + 15 test baru `tests/test_iteration16.py`);
+  testing agent: backend 46/46, frontend 20/21, **0 bug kritis**; alur UI end-to-end
+  diverifikasi manual (timer memakai durasi override 30 menit, submit, badge di kedua sisi).
+
+- **Bug lama ikut diperbaiki**: `DELETE /api/sessions/{id}` tidak menghapus attempt-nya,
+  sehingga attempt yatim terus terhitung di `/api/dashboard/stats` (rata-rata nilai,
+  ujian selesai, perlu dikoreksi) selamanya. Sekarang cascade menghapus attempt + susulan
+  dan mengembalikan `attempts_deleted`. 102 attempt yatim hasil uji coba dibersihkan dari
+  database demo (rata-rata nilai kembali akurat).
+
+> Catatan menjalankan pytest: WAJIB `REACT_APP_BACKEND_URL=http://localhost:8001` karena
+> default di test lama menunjuk URL preview lama yang sudah mati.

@@ -119,6 +119,11 @@ export default function ExamView() {
           </div>
           <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Mode Ujian Ketat</p>
           <h1 className="font-heading text-2xl font-semibold tracking-tight mt-1 mb-2">{data.session.title}</h1>
+          {data.is_makeup && (
+            <p className="text-xs font-medium text-accent mb-2" data-testid="exam-makeup-note">
+              Anda mengerjakan melalui jadwal ujian susulan.
+            </p>
+          )}
           <p className="text-sm text-muted-foreground leading-relaxed mb-5">
             Ujian dijalankan dalam mode terkunci. Baca aturan berikut sebelum memulai.
           </p>
@@ -166,7 +171,12 @@ export default function ExamView() {
       <header className="sticky top-0 z-20 border-b border-border bg-background/80 backdrop-blur-xl">
         <div className="max-w-3xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
           <div className="min-w-0">
-            <p className="text-sm font-medium truncate">{data.session.title}</p>
+            <p className="text-sm font-medium truncate">
+              {data.session.title}
+              {data.is_makeup && (
+                <span className="ml-2 text-xs font-semibold text-accent" data-testid="exam-makeup-tag">· Susulan</span>
+              )}
+            </p>
             <p className="text-xs text-muted-foreground">{answered}/{questions.length} terjawab</p>
           </div>
           {lockCfg.enabled && (
