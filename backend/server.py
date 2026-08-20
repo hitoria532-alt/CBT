@@ -113,6 +113,7 @@ def clean_user(u: dict) -> dict:
     u = dict(u)
     u["id"] = str(u.pop("_id"))
     u.pop("password_hash", None)
+    u.pop("initial_password", None)  # hanya dipakai untuk ekspor kartu login (admin)
     return u
 
 
@@ -365,6 +366,9 @@ async def create_user(body: UserCreate, user: dict = Depends(require_roles("admi
         "name": body.name, "role": body.role, "identifier": body.identifier or "",
         "created_at": now_iso(),
     }
+    if body.role == "siswa":
+        # Disimpan agar guru bisa mencetak kartu login siswa (lihat /api/export/.../accounts).
+        doc["initial_password"] = body.password
     res = await db.users.insert_one(doc)
     doc["_id"] = res.inserted_id
     return clean_user(doc)
@@ -381,6 +385,9 @@ async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(requi
         update["identifier"] = body.identifier
     if body.password:
         update["password_hash"] = hash_password(body.password)
+        target = await db.users.find_one({"_id": ObjectId(user_id)}, {"_id": 0, "role": 1})
+        if (body.role or (target or {}).get("role")) == "siswa":
+            update["initial_password"] = body.password
     if update:
         await db.users.update_one({"_id": ObjectId(user_id)}, {"$set": update})
     u = await db.users.find_one({"_id": ObjectId(user_id)})
@@ -1459,6 +1466,7 @@ async def import_students(file: UploadFile = File(...), user: dict = Depends(req
         if existing is None:
             doc = {"email": username, "password_hash": hash_password(password),
                    "name": nama, "role": "siswa", "identifier": nis,
+                   "initial_password": password,  # untuk cetak kartu login
                    "created_at": now_iso()}
             res = await db.users.insert_one(doc)
             sid = str(res.inserted_id)
@@ -1471,6 +1479,7 @@ async def import_students(file: UploadFile = File(...), user: dict = Depends(req
                     errors.append(f"Baris {rownum}: password minimal 5 karakter, password lama dipertahankan")
                 else:
                     upd["password_hash"] = hash_password(password)
+                    upd["initial_password"] = password
             await db.users.update_one({"_id": existing["_id"]}, {"$set": upd})
             updated += 1
 
@@ -2635,6 +2644,345 @@ async def export_class_grades(class_id: str, user: dict = Depends(require_roles(
     return StreamingResponse(
         buf, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+# ------------------------------------------------------------------ EKSPOR AKUN SISWA (kartu login)
+# Alfabet tanpa karakter ambigu (0/O, 1/l/I) supaya siswa tidak salah mengetik.
+PWD_ALPHABET = "abcdefghjkmnpqrstuvwxyz23456789"
+XLSX_MEDIA = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def generate_student_password(length: int = 8) -> str:
+    return "".join(random.choice(PWD_ALPHABET) for _ in range(length))
+
+
+async def collect_class_accounts(cls: dict, reset: bool) -> List[dict]:
+    """Baris akun siswa satu kelas siap diekspor.
+
+    Password diambil dari `initial_password` yang tersimpan saat akun dibuat. Bila belum
+    ada (akun lama) — atau bila `reset=True` — password baru dibuat dan akun benar-benar
+    di-reset, sehingga setiap baris pada file ekspor dijamin bisa dipakai login.
+    """
+    sids = cls.get("student_ids") or []
+    if not sids:
+        return []
+    oids = []
+    for s in sids:
+        try:
+            oids.append(ObjectId(s))
+        except Exception:
+            continue
+    docs = await db.users.find({"_id": {"$in": oids}, "role": "siswa"}).to_list(2000)
+    docs.sort(key=lambda d: (d.get("name") or "").lower())
+    rows = []
+    for d in docs:
+        stored = (d.get("initial_password") or "").strip()
+        if reset or not stored:
+            pwd = generate_student_password()
+            await db.users.update_one({"_id": d["_id"]}, {"$set": {
+                "password_hash": hash_password(pwd), "initial_password": pwd}})
+            status = "Aktif · Password Baru"
+        else:
+            pwd = stored
+            status = "Aktif · Password Tersimpan"
+        rows.append({
+            "name": d.get("name", "-"),
+            "identifier": d.get("identifier") or "-",
+            "class_name": cls["name"],
+            "username": d.get("email", "-"),
+            "password": pwd,
+            "status": status,
+        })
+    return rows
+
+
+def _accounts_sheet(ws, cls_name: str, rows: List[dict], school: dict):
+    """Isi satu worksheet dengan kop sekolah + tabel akun."""
+    from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
+
+    thin = Border(*[Side(style="thin", color="D8D8D0")] * 4)
+    headers = ["No", "Nama", "NIS", "Kelas", "Username (Email)", "Password", "Status Akun"]
+    ncol = len(headers)
+    last_col = chr(ord("A") + ncol - 1)
+
+    def band(row, text, *, size=11, bold=True, color=XL_GREEN, italic=False):
+        ws.merge_cells(f"A{row}:{last_col}{row}")
+        c = ws.cell(row=row, column=1, value=text)
+        c.font = Font(bold=bold, size=size, color=color, italic=italic)
+        c.alignment = Alignment(horizontal="center", vertical="center")
+
+    r = 1
+    if school.get("name"):
+        band(r, school["name"].upper(), size=14); r += 1
+    if school.get("address"):
+        band(r, school["address"], size=9, bold=False, color="7A7A72"); r += 1
+    band(r, "DAFTAR AKUN LOGIN SISWA", size=13); r += 1
+    band(r, cls_name, size=11, bold=False, color="7A7A72"); r += 1
+    band(r, "Akun di bawah ini sudah aktif dan bisa langsung dipakai login.",
+         size=9, bold=False, color="7A7A72", italic=True); r += 2
+
+    head_row = r
+    for i, h in enumerate(headers, start=1):
+        c = ws.cell(row=head_row, column=i, value=h)
+        c.font = Font(bold=True, color="FFFFFF", size=10)
+        c.fill = PatternFill("solid", fgColor=XL_GREEN)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = thin
+    ws.row_dimensions[head_row].height = 26
+
+    for idx, row in enumerate(rows, start=1):
+        rr = head_row + idx
+        vals = [idx, row["name"], row["identifier"], row["class_name"],
+                row["username"], row["password"], row["status"]]
+        for ci, v in enumerate(vals, start=1):
+            c = ws.cell(row=rr, column=ci, value=v)
+            c.border = thin
+            c.font = Font(size=10, bold=ci in (2, 6),
+                          name="Consolas" if ci == 6 else None)
+            c.alignment = Alignment(
+                horizontal="left" if ci in (2, 4, 5, 7) else "center", vertical="center")
+            if idx % 2 == 0:
+                c.fill = PatternFill("solid", fgColor=XL_STRIPE)
+        pc = ws.cell(row=rr, column=6)
+        pc.fill = PatternFill("solid", fgColor=XL_GREEN_SOFT)
+        pc.font = Font(size=10, bold=True, color=XL_GREEN, name="Consolas")
+
+    if not rows:
+        rr = head_row + 1
+        ws.merge_cells(start_row=rr, start_column=1, end_row=rr, end_column=ncol)
+        c = ws.cell(row=rr, column=1, value="Kelas ini belum memiliki anggota siswa.")
+        c.alignment = Alignment(horizontal="center", vertical="center")
+        c.font = Font(size=10, italic=True, color="7A7A72")
+        c.border = thin
+
+    for col, width in zip("ABCDEFG", (5, 26, 14, 16, 30, 16, 24)):
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = ws.cell(row=head_row + 1, column=1)
+
+
+def _safe_sheet_title(name: str, used: set) -> str:
+    bad = set(':\\/?*[]')
+    title = "".join(ch for ch in name if ch not in bad)[:28] or "Kelas"
+    base, i = title, 2
+    while title in used:
+        title = f"{base[:26]}_{i}"
+        i += 1
+    used.add(title)
+    return title
+
+
+@api_router.get("/export/class/{class_id}/accounts/xlsx")
+async def export_class_accounts_xlsx(class_id: str, reset: bool = False,
+                                     user: dict = Depends(require_roles("admin"))):
+    from openpyxl import Workbook
+
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    rows = await collect_class_accounts(cls, reset)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = _safe_sheet_title(cls["name"], set())
+    _accounts_sheet(ws, cls["name"], rows, school)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    fname = f"akun-siswa-{cls['name']}.xlsx".replace(" ", "_")
+    return StreamingResponse(buf, media_type=XLSX_MEDIA,
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@api_router.get("/export/accounts/xlsx")
+async def export_all_accounts_xlsx(reset: bool = False,
+                                   user: dict = Depends(require_roles("admin"))):
+    """Satu workbook, satu sheet per kelas."""
+    from openpyxl import Workbook
+
+    classes = await db.classes.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+    if not classes:
+        raise HTTPException(status_code=400, detail="Belum ada kelas yang dibuat")
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    wb = Workbook()
+    wb.remove(wb.active)
+    used = set()
+    for cls in classes:
+        rows = await collect_class_accounts(cls, reset)
+        ws = wb.create_sheet(_safe_sheet_title(cls["name"], used))
+        _accounts_sheet(ws, cls["name"], rows, school)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return StreamingResponse(buf, media_type=XLSX_MEDIA,
+                             headers={"Content-Disposition": "attachment; filename=akun-siswa-semua-kelas.xlsx"})
+
+
+async def _build_login_cards_pdf(groups: List[tuple]) -> io.BytesIO:
+    """PDF kartu login siap potong (2 kolom x 5 baris per halaman A4).
+
+    `groups` = [(nama_kelas, rows)].
+    """
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.platypus import (SimpleDocTemplate, Paragraph, Spacer, Table,
+                                    TableStyle, Image, PageBreak)
+
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+    logo_bytes = None
+    if school.get("logo_path"):
+        try:
+            logo_bytes, _ = get_object(school["logo_path"])
+            # Logo disematkan di setiap kartu — perkecil sekali agar PDF tidak membengkak.
+            try:
+                from PIL import Image as PILImage
+                im = PILImage.open(io.BytesIO(logo_bytes))
+                im.thumbnail((180, 180))
+                small = io.BytesIO()
+                im.save(small, format="PNG", optimize=True)
+                logo_bytes = small.getvalue()
+            except Exception:
+                pass
+        except Exception:
+            logo_bytes = None
+
+    green = colors.HexColor("#1E3A30")
+    terra = colors.HexColor("#C0563F")
+    grey = colors.HexColor("#7A7A72")
+    styles = getSampleStyleSheet()
+    st_school = ParagraphStyle("cs", parent=styles["Normal"], fontName="Helvetica-Bold",
+                               fontSize=7.5, leading=9, textColor=green)
+    st_kicker = ParagraphStyle("ck", parent=styles["Normal"], fontSize=5.5, leading=7,
+                               textColor=grey, spaceBefore=1)
+    st_label = ParagraphStyle("cl", parent=styles["Normal"], fontSize=6, leading=8, textColor=grey)
+    st_value = ParagraphStyle("cv", parent=styles["Normal"], fontName="Helvetica-Bold",
+                              fontSize=8, leading=10, textColor=colors.HexColor("#1A1F1D"))
+    st_cred = ParagraphStyle("cc", parent=styles["Normal"], fontName="Courier-Bold",
+                             fontSize=8.5, leading=11, textColor=terra)
+    st_title = ParagraphStyle("ct", parent=styles["Title"], fontSize=13, textColor=green,
+                              spaceAfter=2)
+    st_sub = ParagraphStyle("cu", parent=styles["Normal"], fontSize=8.5, textColor=grey,
+                            spaceAfter=8)
+
+    card_w = 88 * mm
+
+    def card(row):
+        head_cells = []
+        if logo_bytes:
+            try:
+                head_cells.append(Image(io.BytesIO(logo_bytes), width=9 * mm, height=9 * mm))
+            except Exception:
+                head_cells.append("")
+        else:
+            head_cells.append("")
+        title_block = [Paragraph(school.get("name") or "KARTU LOGIN SISWA", st_school),
+                       Paragraph("KARTU LOGIN UJIAN ONLINE (CBT)", st_kicker)]
+        head = Table([[head_cells[0], title_block]],
+                     colWidths=[11 * mm if logo_bytes else 0, None])
+        head.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+            ("LINEBELOW", (0, 0), (-1, -1), 0.5, green),
+        ]))
+        info = Table([
+            [Paragraph("Nama", st_label), Paragraph(row["name"], st_value)],
+            [Paragraph("Kelas / NIS", st_label),
+             Paragraph(f"{row['class_name']} · {row['identifier']}", st_value)],
+            [Paragraph("Username", st_label), Paragraph(row["username"], st_cred)],
+            [Paragraph("Password", st_label), Paragraph(row["password"], st_cred)],
+        ], colWidths=[20 * mm, None])
+        info.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 1.5),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 1.5),
+        ]))
+        inner = Table([[head], [info]], colWidths=[card_w - 8 * mm])
+        inner.setStyle(TableStyle([
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+            ("TOPPADDING", (0, 0), (-1, -1), 2),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
+        ]))
+        outer = Table([[inner]], colWidths=[card_w], rowHeights=[37 * mm])
+        outer.setStyle(TableStyle([
+            ("BOX", (0, 0), (-1, -1), 0.6, colors.HexColor("#9AA5A0"), None, (2, 2)),
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 4 * mm),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 4 * mm),
+            ("TOPPADDING", (0, 0), (-1, -1), 3 * mm),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 2 * mm),
+        ]))
+        return outer
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=10 * mm, bottomMargin=10 * mm,
+                            leftMargin=12 * mm, rightMargin=12 * mm,
+                            title="Kartu Login Siswa")
+    elems = []
+    for gi, (cls_name, rows) in enumerate(groups):
+        if gi:
+            elems.append(PageBreak())
+        elems.append(Paragraph("Kartu Login Siswa", st_title))
+        elems.append(Paragraph(
+            f"{cls_name} · {len(rows)} siswa · potong mengikuti garis putus-putus", st_sub))
+        if not rows:
+            elems.append(Paragraph("Kelas ini belum memiliki anggota siswa.", st_label))
+            continue
+        cards = [card(r) for r in rows]
+        grid = []
+        for i in range(0, len(cards), 2):
+            pair = cards[i:i + 2]
+            if len(pair) == 1:
+                pair.append("")
+            grid.append(pair)
+        t = Table(grid, colWidths=[card_w, card_w])
+        t.setStyle(TableStyle([
+            ("VALIGN", (0, 0), (-1, -1), "TOP"),
+            ("LEFTPADDING", (0, 0), (-1, -1), 0),
+            ("RIGHTPADDING", (0, 0), (-1, -1), 2 * mm),
+            ("TOPPADDING", (0, 0), (-1, -1), 0),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 3 * mm),
+        ]))
+        elems.append(t)
+    doc.build(elems)
+    buf.seek(0)
+    return buf
+
+
+@api_router.get("/export/class/{class_id}/accounts/pdf")
+async def export_class_accounts_pdf(class_id: str, reset: bool = False,
+                                    user: dict = Depends(require_roles("admin"))):
+    cls = await db.classes.find_one({"id": class_id}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    rows = await collect_class_accounts(cls, reset)
+    buf = await _build_login_cards_pdf([(cls["name"], rows)])
+    fname = f"kartu-login-{cls['name']}.pdf".replace(" ", "_")
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": f"attachment; filename={fname}"})
+
+
+@api_router.get("/export/accounts/pdf")
+async def export_all_accounts_pdf(reset: bool = False,
+                                  user: dict = Depends(require_roles("admin"))):
+    classes = await db.classes.find({}, {"_id": 0}).sort("name", 1).to_list(500)
+    if not classes:
+        raise HTTPException(status_code=400, detail="Belum ada kelas yang dibuat")
+    groups = [(c["name"], await collect_class_accounts(c, reset)) for c in classes]
+    buf = await _build_login_cards_pdf(groups)
+    return StreamingResponse(buf, media_type="application/pdf",
+                             headers={"Content-Disposition": "attachment; filename=kartu-login-semua-kelas.pdf"})
+
 
 
 # ------------------------------------------------------------------ DASHBOARD
