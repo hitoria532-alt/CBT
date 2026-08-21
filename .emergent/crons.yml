@@ -1,0 +1,8 @@
+crons:
+  - name: auto-submit-exams
+    description: "Auto-submits and grades in-progress exam attempts whose session time or duration has expired"
+    cron: "*/15 * * * *"
+    endpoint: "{{BASE_URL}}/api/cron/auto-submit"
+    method: POST
+    # Cron endpoints must ack 2xx immediately; enqueue/background the actual work.
+    enabled: true

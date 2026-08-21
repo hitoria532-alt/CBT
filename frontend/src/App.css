@@ -1,0 +1,17 @@
+.App {
+    min-height: 100vh;
+}
+
+/* ---- Mode Ujian Ketat (exam lockdown) ---- */
+body.exam-locked {
+  -webkit-user-select: none;
+  -ms-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  overscroll-behavior: none;
+}
+body.exam-locked textarea,
+body.exam-locked input {
+  -webkit-user-select: text;
+  user-select: text;
+}

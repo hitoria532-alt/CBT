@@ -1,0 +1,28 @@
+{
+  "summary": "Iteration 8 tested: Statistik Mapel (GET /api/analytics/subjects) and Filter Peringkat Siswa (category_id on /api/leaderboard/me), plus UI on /admin (subject-stats-chart) and /peringkat (student-subject-filter). All 16 backend tests pass; UI renders correctly for both features. Regression (login all 3 roles, class leaderboard, global leaderboard, Excel export) also pass.",
+  "backend_issues": {"critical": [], "minor": []},
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": [
+      {"screen": "Admin Dashboard / subject-stats-chart", "issues": ["Recharts logs repeated 'The width(-1) and height(-1) of chart should be greater than 0' warnings on initial mount (ResponsiveContainer measuring before layout). Chart still renders correctly after layout settles. Consider giving the ResponsiveContainer an explicit min-height or aspect ratio to silence warnings."]}
+    ]
+  },
+  "test_report_links": [
+    "/app/backend/tests/test_iteration8.py",
+    "/app/test_reports/pytest/iteration8_results.xml"
+  ],
+  "action_items": [],
+  "critical_code_review_comments": [
+    "analytics/subjects: N is small so per-attempt in-memory grouping is fine, but note it loads up to 20k attempts each call - if attempts grow large consider a MongoDB $group aggregation.",
+    "compute_class_leaderboard performs one attempts.find per student (N+1 queries). Acceptable for small classes but should be batched via aggregation for scalability."
+  ],
+  "updated_files": ["/app/backend/tests/test_iteration8.py"],
+  "success_rate": {"backend": "100% (16/16)", "frontend": "100% (features render + filter re-fetch verified)"},
+  "test_credentials": "admin hitoria532@gmail.com/admin123; guru guru@sekolah.id/guru123; siswa siswa@sekolah.id/siswa123",
+  "seed_data_creation": "None - used existing seed. Verified with existing categories (Matematika, TEST_I4_IMP_6fe705b7, TEST_ImportCat_1787067432).",
+  "retest_needed": false,
+  "should_main_agent_self_test": false,
+  "context_for_next_testing_agent": "Iteration 8 features validated. /api/analytics/subjects returns correctly-shaped list sorted by avg_score desc; Umum only appears when uncategorized attempts exist; categories with 0 attempts have avg_score 0. /api/leaderboard/me?category_id filters attempts by package.category_id and returns 0 for orphaned attempts (expected). UI: /admin renders subject-stats-chart (SVG bar chart) with only categories that have attempts; /peringkat renders student-subject-filter with 'Semua Mapel' + categories, and changing it re-fetches both lb-angkatan and lb-class-{id}. Siswa 'Ani Siswa' shows '(Anda)' highlight in both sections. Bogus category_id yields all-zero rows.",
+  "rca of the issue": "N/A - no bugs found."
+}

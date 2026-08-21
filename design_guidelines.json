@@ -1,0 +1,145 @@
+{
+  "theme": {
+    "name": "The Calm Authority (Swiss Layout + Organic/Earthy Palette)",
+    "description": "A dual-experience design. For Admins/Teachers: A structured, high-density, Swiss-style dashboard focused on clarity, data management, and authority. For Students: A calming, distraction-free, earthy interface designed to reduce exam anxiety while maintaining extreme legibility.",
+    "mode": "Light theme default. Dark theme supported but light mode is highly recommended for the 'exam paper' feel."
+  },
+  "colors": {
+    "strategy": "Archetype 1 (Organic & Earthy). Avoid standard SaaS blue. Use grounded, matte colors to reduce stress.",
+    "light_mode_hsl": {
+      "--background": "60 20% 98%",
+      "--foreground": "160 5% 10%",
+      "--card": "0 0% 100%",
+      "--card-foreground": "160 5% 10%",
+      "--popover": "0 0% 100%",
+      "--popover-foreground": "160 5% 10%",
+      "--primary": "157 35% 18%",
+      "--primary-foreground": "60 20% 98%",
+      "--secondary": "150 12% 56%",
+      "--secondary-foreground": "157 35% 18%",
+      "--muted": "60 10% 92%",
+      "--muted-foreground": "150 5% 45%",
+      "--accent": "10 58% 53%",
+      "--accent-foreground": "0 0% 100%",
+      "--destructive": "10 58% 53%",
+      "--destructive-foreground": "60 20% 98%",
+      "--border": "60 10% 88%",
+      "--input": "60 10% 88%",
+      "--ring": "157 35% 18%"
+    },
+    "dark_mode_hsl": {
+      "--background": "160 10% 8%",
+      "--foreground": "60 20% 95%",
+      "--card": "160 8% 12%",
+      "--card-foreground": "60 20% 95%",
+      "--popover": "160 8% 12%",
+      "--popover-foreground": "60 20% 95%",
+      "--primary": "150 25% 65%",
+      "--primary-foreground": "160 10% 8%",
+      "--secondary": "160 8% 20%",
+      "--secondary-foreground": "60 20% 95%",
+      "--muted": "160 8% 20%",
+      "--muted-foreground": "150 5% 65%",
+      "--accent": "10 50% 60%",
+      "--accent-foreground": "160 10% 8%",
+      "--destructive": "0 62% 40%",
+      "--destructive-foreground": "60 20% 95%",
+      "--border": "160 8% 20%",
+      "--input": "160 8% 20%",
+      "--ring": "150 25% 65%"
+    },
+    "notes": "Primary is Deep Forest Green. Accent is Warm Terracotta. Background is Bone White."
+  },
+  "typography": {
+    "strategy": "Business/Corporate mixed with Technical legibility.",
+    "fonts": {
+      "heading": "'Outfit', sans-serif",
+      "body": "'IBM Plex Sans', sans-serif"
+    },
+    "rules": {
+      "h1": "text-4xl sm:text-5xl font-semibold tracking-tight text-primary",
+      "h2": "text-2xl sm:text-3xl font-medium tracking-tight",
+      "h3": "text-xl sm:text-2xl font-medium",
+      "h4": "text-lg sm:text-xl font-medium",
+      "body": "text-base leading-relaxed",
+      "labels_overlines": "text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground",
+      "questions": "text-lg sm:text-xl leading-loose font-medium text-foreground",
+      "timer": "text-xl font-bold font-mono tracking-widest"
+    },
+    "instructions_to_main_agent": "Add Google Fonts link to index.html for Outfit and IBM Plex Sans. Update font-family in index.css body and headings."
+  },
+  "layouts": {
+    "student_exam_view": {
+      "description": "Distraction-free focus zone.",
+      "header": "Sticky top, backdrop-blur-xl bg-background/80, 1px solid bottom border. Contains student info, progress bar, and Timer.",
+      "main_container": "Centered, max-w-3xl, generous padding (py-12 px-4 sm:px-8).",
+      "navigation": "Fixed bottom bar or distinct section below question. Prev/Next buttons. Question palette grid accessible via a slide-out sheet or minimal sidebar.",
+      "background": "Use a subtle paper texture image at 3% opacity or solid bone-white."
+    },
+    "admin_teacher_dashboard": {
+      "description": "High-density data control.",
+      "sidebar": "Left fixed sidebar. Solid background, right border. Categorized links (Dashboard, Paket Soal, Sesi, Hasil, Akun).",
+      "main_content": "Bento Grid Protocol Mode B (High Density). gap-6, p-8. Grid items span correctly to form a cohesive dashboard.",
+      "cards": "Flat design, 1px border-border, no shadow. Hover: slight shadow-sm."
+    }
+  },
+  "components": {
+    "buttons": {
+      "primary": "bg-primary text-primary-foreground hover:bg-primary/90 rounded-md transition-all active:scale-[0.98]",
+      "secondary": "border border-input bg-background hover:bg-accent hover:text-accent-foreground rounded-md transition-all",
+      "timer_alert": "bg-destructive/10 text-destructive border border-destructive/20 animate-pulse"
+    },
+    "cards": {
+      "style": "bg-card text-card-foreground border rounded-md shadow-none",
+      "exam_option": "w-full text-left p-4 border rounded-md transition-all hover:border-primary/50 hover:bg-primary/5 flex items-start gap-4",
+      "exam_option_selected": "border-primary bg-primary/10 ring-1 ring-primary"
+    },
+    "inputs": {
+      "style": "rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background file:border-0 file:bg-transparent file:text-sm file:font-medium placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+    },
+    "tables": {
+      "style": "w-full text-sm",
+      "header": "border-b bg-muted/50 text-muted-foreground font-medium uppercase tracking-wider text-xs p-3 text-left",
+      "row": "border-b hover:bg-muted/30 transition-colors cursor-pointer"
+    }
+  },
+  "motion": {
+    "page_transitions": "Fade in, slight upward translation (translate-y-2 to 0, opacity 0 to 1).",
+    "exam_question_transition": "Use Framer Motion to slide questions left/right when navigating Prev/Next.",
+    "hover_states": "All interactive elements must have a transition (e.g., transition: background-color 0.2s ease, border-color 0.2s ease). DO NOT use 'transition: all'.",
+    "timer_critical": "When timer < 5 mins, text turns to accent/destructive color and slowly pulses (scale 1 to 1.05)."
+  },
+  "visual_enhancers": {
+    "glassmorphism": "Use 'backdrop-blur-xl bg-background/80 border-b border-border' for sticky headers (Admin Nav or Student Exam Header). Do NOT use transparent backgrounds.",
+    "borders": "Expose the skeleton. Use 1px solid borders (border-border) generously to separate sections, creating a technical, Swiss look."
+  },
+  "image_urls": {
+    "login_background": {
+      "url": "https://images.unsplash.com/photo-1601662528567-526cd06f6582?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwxfHxhYnN0cmFjdCUyMGNhbG1pbmclMjBwYXBlciUyMHRleHR1cmV8ZW58MHx8fHwxNzg3MDY1NTc4fDA&ixlib=rb-4.1.0&q=85",
+      "description": "White textured paper surface. Use as an absolute background for the Login Screen and Student Exam view with low opacity (e.g., 5-10% opacity) or mix-blend-multiply to create an authentic 'paper exam' feel."
+    },
+    "empty_state_illustration": {
+      "url": "https://images.unsplash.com/photo-1603484477859-abe6a73f9366?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjAzMjV8MHwxfHNlYXJjaHwyfHxhYnN0cmFjdCUyMGNhbG1pbmclMjBwYXBlciUyMHRleHR1cmV8ZW58MHx8fHwxNzg3MDY1NTc4fDA&ixlib=rb-4.1.0&q=85",
+      "description": "Crumpled beige parchment. Use inside 'No Data' cards or empty states with heavy grayscale and high brightness to add texture without distraction."
+    }
+  },
+  "libraries_and_tools": {
+    "icons": "lucide-react (Standard, clean, readable)",
+    "charts": "recharts (For 'laporan hasil siswa' / Student Result Reports and Admin Dashboards)",
+    "motion": "framer-motion",
+    "toast": "sonner"
+  },
+  "accessibility_and_testing": {
+    "contrast": "Ensure primary text vs background meets WCAG AA (4.5:1). Deep Charcoal on Bone White exceeds this easily.",
+    "testing_attributes": "All interactive elements MUST include a 'data-testid' attribute (e.g., data-testid='login-submit-button', data-testid='next-question-btn', data-testid='option-a-radio')."
+  },
+  "universal_guidelines_for_main_agent": [
+    "Prioritize using pre-existing components from src/components/ui when applicable.",
+    "Never center align the App container (do not add .App { text-align: center; }). Left align text by default for readability, especially for questions and passages.",
+    "Use 2-3x more spacing than feels comfortable. e.g., p-8 instead of p-4 in cards.",
+    "Do not use generic AI emojis.",
+    "Always explicitly set text color on hover.",
+    "Only use primary/brand color for CTAs. Limit the use of PRIMARY color elsewhere.",
+    "Ensure the UI layout cleanly separates the 'Admin/Teacher' routing (Sidebar + Bento Grid) from the 'Student' routing (Minimal Topbar + Centered Focus content)."
+  ]
+}
