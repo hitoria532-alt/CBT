@@ -14,6 +14,7 @@ const LABELS = {
   questions: "Bank soal",
   packages: "Paket soal",
   sessions: "Sesi ujian",
+  makeups: "Ujian susulan",
   attempts: "Hasil pengerjaan siswa",
   settings: "Pengaturan sekolah",
   files: "Metadata gambar",

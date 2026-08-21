@@ -3506,7 +3506,7 @@ async def export_leaderboard(start: Optional[str] = None, end: Optional[str] = N
 
 # ------------------------------------------------------------------ BACKUP / RESTORE
 BACKUP_COLLECTIONS = ["users", "classes", "categories", "questions", "packages",
-                      "sessions", "attempts", "settings", "files", "file_blobs"]
+                      "sessions", "makeups", "attempts", "settings", "files", "file_blobs"]
 BACKUP_VERSION = 1
 
 

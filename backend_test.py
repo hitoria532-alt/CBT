@@ -1547,6 +1547,322 @@ class CBTAPITester:
             self.tests_run += 1
 
 
+    def test_makeup_exams(self):
+        """Test makeup exam (ujian susulan) feature"""
+        print("\n🔄 Testing makeup exam feature...")
+        
+        # Create a session first
+        success, cat = self.run_test(
+            "Create Category for Makeup Test",
+            "POST", "categories", 200,
+            data={"name": "Makeup Test Category", "description": "Test"},
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        cat_id = cat.get('id')
+        
+        # Create question
+        success, q = self.run_test(
+            "Create Question for Makeup",
+            "POST", "questions", 200,
+            data={
+                "category_id": cat_id, "type": "pg",
+                "text": "Makeup test question?",
+                "options": ["A", "B", "C", "D"],
+                "correct_answer": "1", "weight": 1.0
+            },
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        q_id = q.get('id')
+        
+        # Create package
+        success, pkg = self.run_test(
+            "Create Package for Makeup",
+            "POST", "packages", 200,
+            data={
+                "title": "Makeup Test Package",
+                "question_ids": [q_id],
+                "scoring_method": "percentage"
+            },
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        pkg_id = pkg.get('id')
+        
+        # Create class
+        success, cls = self.run_test(
+            "Create Class for Makeup",
+            "POST", "classes", 200,
+            data={"name": "Makeup Test Class", "description": "Test"},
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        cls_id = cls.get('id')
+        
+        # Create student
+        success, student = self.run_test(
+            "Create Student for Makeup",
+            "POST", "users", 200,
+            data={
+                "email": f"makeup_student_{datetime.now().timestamp()}@test.id",
+                "password": "Test@12345",
+                "name": "Makeup Test Student",
+                "role": "siswa",
+                "identifier": "MKP001"
+            },
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        student_id = student.get('id')
+        
+        # Add student to class
+        success, _ = self.run_test(
+            "Add Student to Class",
+            "POST", f"classes/{cls_id}/students/attach", 200,
+            data={"student_ids": [student_id]},
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        # Create session
+        now = datetime.now(timezone.utc)
+        start = (now - timedelta(hours=2)).isoformat()
+        end = (now - timedelta(hours=1)).isoformat()
+        
+        success, session = self.run_test(
+            "Create Session for Makeup",
+            "POST", "sessions", 200,
+            data={
+                "title": "Makeup Test Session",
+                "package_id": pkg_id,
+                "start_time": start,
+                "end_time": end,
+                "duration_minutes": 60,
+                "kkm": 75,
+                "class_ids": [cls_id]
+            },
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        session_id = session.get('id')
+        
+        # Test GET /makeups/absentees/{session_id}
+        success, absentees_data = self.run_test(
+            "GET Makeup Absentees",
+            "GET", f"makeups/absentees/{session_id}", 200,
+            token=self.admin_token
+        )
+        if success:
+            assert 'absentees' in absentees_data, "Missing 'absentees' in response"
+            assert len(absentees_data['absentees']) > 0, "Should have at least one absentee"
+            print(f"   Found {len(absentees_data['absentees'])} absentee(s)")
+        
+        # Test POST /makeups (create makeup exam)
+        makeup_start = (now + timedelta(hours=1)).isoformat()
+        makeup_end = (now + timedelta(hours=3)).isoformat()
+        
+        success, makeup_result = self.run_test(
+            "Create Makeup Exam",
+            "POST", "makeups", 200,
+            data={
+                "session_id": session_id,
+                "student_ids": [student_id],
+                "start_time": makeup_start,
+                "end_time": makeup_end,
+                "duration_minutes": 90,
+                "reason": "Sakit"
+            },
+            token=self.admin_token
+        )
+        if success:
+            assert makeup_result.get('created', 0) > 0, "Should create at least one makeup"
+            print(f"   Created: {makeup_result.get('created')}, Updated: {makeup_result.get('updated')}")
+        
+        # Test GET /makeups (list all makeups)
+        success, makeups = self.run_test(
+            "List All Makeups",
+            "GET", "makeups", 200,
+            token=self.admin_token
+        )
+        if success:
+            assert isinstance(makeups, list), "Makeups should be a list"
+            assert len(makeups) > 0, "Should have at least one makeup"
+            makeup_id = makeups[0].get('id')
+            print(f"   Found {len(makeups)} makeup(s)")
+        
+        # Test GET /makeups?session_id=...
+        success, session_makeups = self.run_test(
+            "List Makeups by Session",
+            "GET", f"makeups?session_id={session_id}", 200,
+            token=self.admin_token
+        )
+        if success:
+            assert isinstance(session_makeups, list), "Should be a list"
+            print(f"   Found {len(session_makeups)} makeup(s) for session")
+        
+        # Test GET /makeups/summary
+        success, summary = self.run_test(
+            "Get Makeups Summary",
+            "GET", "makeups/summary", 200,
+            token=self.admin_token
+        )
+        if success:
+            assert isinstance(summary, dict), "Summary should be a dict"
+            print(f"   Summary: {summary}")
+        
+        # Test PUT /makeups/{mid} (update makeup)
+        if makeup_id:
+            new_start = (now + timedelta(hours=2)).isoformat()
+            new_end = (now + timedelta(hours=4)).isoformat()
+            
+            success, updated = self.run_test(
+                "Update Makeup Exam",
+                "PUT", f"makeups/{makeup_id}", 200,
+                data={
+                    "start_time": new_start,
+                    "end_time": new_end,
+                    "duration_minutes": 120,
+                    "reason": "Sakit (updated)"
+                },
+                token=self.admin_token
+            )
+            if success:
+                assert updated.get('reason') == "Sakit (updated)", "Reason should be updated"
+                print(f"   Updated makeup: {updated.get('student_name')}")
+        
+        # Test DELETE /makeups/{mid}
+        if makeup_id:
+            success, _ = self.run_test(
+                "Delete Makeup Exam",
+                "DELETE", f"makeups/{makeup_id}", 200,
+                token=self.admin_token
+            )
+        
+        return True
+    
+    def test_class_roster_management(self):
+        """Test class roster (student account) management"""
+        print("\n👥 Testing class roster management...")
+        
+        # Create a class
+        success, cls = self.run_test(
+            "Create Class for Roster Test",
+            "POST", "classes", 200,
+            data={"name": "Roster Test Class", "description": "Test"},
+            token=self.admin_token
+        )
+        if not success:
+            return False
+        
+        cls_id = cls.get('id')
+        
+        # Test GET /classes/{cid}/students
+        success, roster_data = self.run_test(
+            "GET Class Students",
+            "GET", f"classes/{cls_id}/students", 200,
+            token=self.admin_token
+        )
+        if success:
+            assert 'students' in roster_data, "Missing 'students' in response"
+            assert 'available' in roster_data, "Missing 'available' in response"
+            print(f"   Students: {len(roster_data['students'])}, Available: {len(roster_data['available'])}")
+        
+        # Test POST /classes/{cid}/students (create student account)
+        timestamp = datetime.now().timestamp()
+        success, new_student = self.run_test(
+            "Create Student Account in Class",
+            "POST", f"classes/{cls_id}/students", 200,
+            data={
+                "name": "Roster Test Student",
+                "email": f"roster_test_{timestamp}@test.id",
+                "password": "Test@12345",
+                "identifier": "RST001"
+            },
+            token=self.admin_token
+        )
+        if success:
+            student_id = new_student.get('id')
+            assert student_id, "Should return student id"
+            print(f"   Created student: {new_student.get('name')}")
+        
+        # Test POST /classes/{cid}/students/reset-passwords (bulk reset)
+        success, reset_result = self.run_test(
+            "Bulk Reset Passwords (random)",
+            "POST", f"classes/{cls_id}/students/reset-passwords", 200,
+            data={"mode": "random"},
+            token=self.admin_token
+        )
+        if success:
+            assert 'credentials' in reset_result, "Missing 'credentials' in response"
+            assert reset_result.get('count', 0) > 0, "Should reset at least one password"
+            print(f"   Reset {reset_result.get('count')} password(s)")
+        
+        # Test POST /classes/{cid}/students/reset-passwords (same password)
+        success, reset_result2 = self.run_test(
+            "Bulk Reset Passwords (same)",
+            "POST", f"classes/{cls_id}/students/reset-passwords", 200,
+            data={"mode": "same", "password": "NewPass@123"},
+            token=self.admin_token
+        )
+        if success:
+            assert reset_result2.get('count', 0) > 0, "Should reset at least one password"
+            print(f"   Reset {reset_result2.get('count')} password(s) with same password")
+        
+        # Test GET /classes/{cid}/students/xlsx (export roster)
+        url = f"{self.base_url}/classes/{cls_id}/students/xlsx"
+        headers = {'Authorization': f'Bearer {self.admin_token}'}
+        response = requests.get(url, headers=headers, timeout=30)
+        if response.status_code == 200:
+            self.tests_passed += 1
+            print(f"✅ Export Class Roster Excel - Status: {response.status_code}")
+            assert response.headers.get('content-type') == 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+        else:
+            self.tests_failed += 1
+            self.failed_tests.append("Export Class Roster Excel")
+            print(f"❌ Export Class Roster Excel - Expected 200, got {response.status_code}")
+        self.tests_run += 1
+        
+        # Test DELETE /classes/{cid}/students/{sid} (remove from class)
+        if student_id:
+            success, _ = self.run_test(
+                "Remove Student from Class",
+                "DELETE", f"classes/{cls_id}/students/{student_id}", 200,
+                token=self.admin_token
+            )
+        
+        # Test DELETE /classes/{cid}/students/{sid}?delete_account=true
+        if student_id:
+            # Re-add student first
+            success, _ = self.run_test(
+                "Re-add Student to Class",
+                "POST", f"classes/{cls_id}/students/attach", 200,
+                data={"student_ids": [student_id]},
+                token=self.admin_token
+            )
+            
+            # Then delete account
+            success, _ = self.run_test(
+                "Delete Student Account",
+                "DELETE", f"classes/{cls_id}/students/{student_id}?delete_account=true", 200,
+                token=self.admin_token
+            )
+        
+        return True
+
 def main():
     print("=" * 60)
     print("CBT UJIAN ONLINE - BACKEND API TEST")
@@ -1574,6 +1890,18 @@ def main():
     tester.test_sessions_crud()
     tester.test_classes_crud()
     tester.test_users_crud()
+    
+    # Test makeup exams (merged feature)
+    print("\n" + "=" * 60)
+    print("MAKEUP EXAM TESTS (MERGED FEATURE)")
+    print("=" * 60)
+    tester.test_makeup_exams()
+    
+    # Test class roster management (new feature)
+    print("\n" + "=" * 60)
+    print("CLASS ROSTER MANAGEMENT TESTS (NEW FEATURE)")
+    print("=" * 60)
+    tester.test_class_roster_management()
     
     # Test settings
     print("\n" + "=" * 60)
