@@ -15,6 +15,7 @@ import { Checkbox } from "../../components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
+import ClassRosterDialog from "./ClassRosterDialog";
 
 const EMPTY = { name: "", description: "", student_ids: [] };
 
@@ -28,6 +29,7 @@ export default function Classes() {
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
+  const [roster, setRoster] = useState(null);
   const fileRef = useRef();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -151,16 +153,24 @@ export default function Classes() {
                 </div>
               </div>
               <p className="text-sm text-muted-foreground mt-1 mb-4">{c.description || "Tanpa deskripsi"}</p>
-              <div className="flex items-center justify-between gap-2 flex-wrap">
+              <button
+                onClick={() => setRoster(c)}
+                className="w-full flex items-center justify-between gap-2 rounded-md border border-border bg-muted/30 px-3 py-2.5 mb-3 text-left hover:border-primary/40 hover:bg-primary/5 transition-colors"
+                data-testid={`open-roster-${c.id}`}
+              >
+                <span className="flex items-center gap-2 text-sm font-medium">
+                  <Users className="h-4 w-4 text-primary" />
+                  Akun Siswa
+                </span>
                 <Badge className="bg-primary/10 text-primary border-0">{c.student_count} siswa</Badge>
-                <div className="flex gap-2">
-                  <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
-                    <Download className="h-4 w-4 mr-1.5" />Rekap
-                  </Button>
-                  <Button size="sm" variant="outline" onClick={() => downloadClassReport(c)} data-testid={`class-report-${c.id}`}>
-                    <FileText className="h-4 w-4 mr-1.5" />Rapor
-                  </Button>
-                </div>
+              </button>
+              <div className="flex items-center justify-end gap-2 flex-wrap">
+                <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
+                  <Download className="h-4 w-4 mr-1.5" />Rekap
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => downloadClassReport(c)} data-testid={`class-report-${c.id}`}>
+                  <FileText className="h-4 w-4 mr-1.5" />Rapor
+                </Button>
               </div>
             </div>
           ))}
@@ -290,6 +300,13 @@ export default function Classes() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <ClassRosterDialog
+        cls={roster}
+        open={!!roster}
+        onOpenChange={(v) => { if (!v) setRoster(null); }}
+        onChanged={() => { load(); api.get("/users?role=siswa").then((r) => setStudents(r.data)); }}
+      />
     </div>
   );
 }

@@ -20,7 +20,7 @@ import requests
 import pandas as pd
 from bson import ObjectId
 from fastapi import (FastAPI, APIRouter, HTTPException, Depends, Request, Response,
-                     UploadFile, File, BackgroundTasks, Header, Query)
+                     UploadFile, File, Form, BackgroundTasks, Header, Query)
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -891,6 +891,207 @@ async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "gu
     return {"ok": True}
 
 
+# ------------------------------------------------------- CLASS ROSTER (student accounts)
+class ClassStudentCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    identifier: Optional[str] = None
+
+
+class AttachStudentsBody(BaseModel):
+    student_ids: List[str] = []
+
+
+async def _get_class_or_404(cid: str) -> dict:
+    cls = await db.classes.find_one({"id": cid}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    return cls
+
+
+async def _class_roster(cls: dict) -> List[dict]:
+    ids = cls.get("student_ids", []) or []
+    oids = []
+    for sid in ids:
+        try:
+            oids.append(ObjectId(sid))
+        except Exception:
+            continue
+    if not oids:
+        return []
+    users = await db.users.find({"_id": {"$in": oids}, "role": "siswa"}).to_list(2000)
+    roster = []
+    for u in users:
+        attempts = await db.attempts.count_documents({"student_id": str(u["_id"]), "status": "selesai"})
+        roster.append({
+            "id": str(u["_id"]),
+            "name": u.get("name", ""),
+            "email": u.get("email", ""),
+            "identifier": u.get("identifier", "") or "",
+            "created_at": u.get("created_at"),
+            "exams_done": attempts,
+        })
+    roster.sort(key=lambda x: x["name"].lower())
+    return roster
+
+
+@api_router.get("/classes/{cid}/students")
+async def list_class_students(cid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Student accounts that belong to this class + students not in any class yet."""
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    member_ids = {s["id"] for s in roster}
+
+    all_classes = await db.classes.find({}, {"_id": 0, "id": 1, "name": 1, "student_ids": 1}).to_list(1000)
+    class_of = {}
+    for c in all_classes:
+        for sid in c.get("student_ids", []) or []:
+            class_of.setdefault(sid, []).append(c["name"])
+
+    others = []
+    async for u in db.users.find({"role": "siswa"}):
+        sid = str(u["_id"])
+        if sid in member_ids:
+            continue
+        others.append({"id": sid, "name": u.get("name", ""), "email": u.get("email", ""),
+                       "identifier": u.get("identifier", "") or "",
+                       "class_names": class_of.get(sid, [])})
+    others.sort(key=lambda x: x["name"].lower())
+    return {"class": {"id": cls["id"], "name": cls["name"], "description": cls.get("description", "")},
+            "students": roster, "available": others}
+
+
+@api_router.post("/classes/{cid}/students")
+async def add_class_student(cid: str, body: ClassStudentCreate,
+                            user: dict = Depends(require_roles("admin"))):
+    """Create a login-ready student account and put it straight into this class."""
+    cls = await _get_class_or_404(cid)
+    email = body.email.lower().strip()
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Nama siswa wajib diisi")
+    if len(body.password or "") < 5:
+        raise HTTPException(status_code=400, detail="Password minimal 5 karakter")
+
+    existing = await db.users.find_one({"email": email})
+    if existing is not None:
+        if existing.get("role") != "siswa":
+            raise HTTPException(status_code=400,
+                                detail=f"Email sudah dipakai akun {existing.get('role')}")
+        raise HTTPException(status_code=400,
+                            detail="Email sudah terdaftar sebagai siswa. Gunakan 'Tambah dari akun yang ada'.")
+
+    doc = {"email": email, "password_hash": hash_password(body.password),
+           "name": body.name.strip(), "role": "siswa",
+           "identifier": (body.identifier or "").strip(), "created_at": now_iso()}
+    res = await db.users.insert_one(doc)
+    sid = str(res.inserted_id)
+    members = list(dict.fromkeys((cls.get("student_ids") or []) + [sid]))
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    return {"id": sid, "name": doc["name"], "email": email,
+            "identifier": doc["identifier"], "exams_done": 0}
+
+
+@api_router.post("/classes/{cid}/students/attach")
+async def attach_class_students(cid: str, body: AttachStudentsBody,
+                                user: dict = Depends(require_roles("admin", "guru"))):
+    """Move/attach existing student accounts into this class."""
+    cls = await _get_class_or_404(cid)
+    valid = []
+    for sid in body.student_ids:
+        try:
+            u = await db.users.find_one({"_id": ObjectId(sid), "role": "siswa"})
+        except Exception:
+            u = None
+        if u:
+            valid.append(sid)
+    members = list(dict.fromkeys((cls.get("student_ids") or []) + valid))
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    return {"added": len(set(valid) - set(cls.get("student_ids") or [])), "total": len(members)}
+
+
+@api_router.delete("/classes/{cid}/students/{sid}")
+async def remove_class_student(cid: str, sid: str, delete_account: bool = False,
+                               user: dict = Depends(require_roles("admin"))):
+    """Remove a student from the class; optionally delete the login account too."""
+    cls = await _get_class_or_404(cid)
+    members = [x for x in (cls.get("student_ids") or []) if x != sid]
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    if delete_account:
+        try:
+            await db.users.delete_one({"_id": ObjectId(sid), "role": "siswa"})
+        except Exception:
+            pass
+        await db.classes.update_many({"student_ids": sid}, {"$pull": {"student_ids": sid}})
+    return {"ok": True, "deleted_account": bool(delete_account)}
+
+
+@api_router.get("/classes/{cid}/students/xlsx")
+async def export_class_roster(cid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Excel list of student accounts of a class (name, NIS, username) to hand out."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Akun Siswa"
+    ws.sheet_view.showGridLines = False
+    widths = [6, 34, 20, 38, 16]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    r = 1
+    if school.get("name"):
+        ws.merge_cells(f"A{r}:E{r}")
+        c = ws.cell(row=r, column=1, value=school["name"].upper())
+        c.font = Font(bold=True, size=13, color=XL_GREEN)
+        r += 1
+    ws.merge_cells(f"A{r}:E{r}")
+    c = ws.cell(row=r, column=1, value=f"Daftar Akun Siswa — {cls['name']}")
+    c.font = Font(bold=True, size=11)
+    r += 2
+
+    headers = ["No", "Nama Siswa", "NIS / NISN", "Username (Email Login)", "Jumlah Ujian"]
+    for i, h in enumerate(headers, start=1):
+        cell = ws.cell(row=r, column=i, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=XL_GREEN)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _xl_border()
+    r += 1
+    for idx, s in enumerate(roster, start=1):
+        for i, v in enumerate([idx, s["name"], s["identifier"] or "-", s["email"], s["exams_done"]], start=1):
+            cell = ws.cell(row=r, column=i, value=v)
+            cell.border = _xl_border()
+            if i in (1, 3, 5):
+                cell.alignment = Alignment(horizontal="center")
+        r += 1
+    if not roster:
+        ws.merge_cells(f"A{r}:E{r}")
+        ws.cell(row=r, column=1, value="Belum ada siswa di kelas ini.").alignment = Alignment(horizontal="center")
+        r += 1
+    r += 1
+    ws.merge_cells(f"A{r}:E{r}")
+    note = ws.cell(row=r, column=1,
+                   value="Siswa login memakai Username (Email) dan password yang diberikan admin. "
+                         "Password tidak ditampilkan demi keamanan — gunakan tombol 'Reset Password' bila lupa.")
+    note.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r].height = 30
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", cls["name"]).strip("-") or "kelas"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="akun-siswa-{safe}.xlsx"'})
+
+
 # ------------------------------------------------------------------ STUDENT IMPORT (Excel)
 STUDENT_COLS = ["nama", "kelas", "nis", "username", "password"]
 STUDENT_COL_HELP = {
@@ -1079,8 +1280,19 @@ async def student_import_template(user: dict = Depends(require_roles("admin", "g
 
 
 @api_router.post("/students/import")
-async def import_students(file: UploadFile = File(...), user: dict = Depends(require_roles("admin"))):
-    """Bulk-create student accounts from Excel/CSV and place them into classes."""
+async def import_students(file: UploadFile = File(...),
+                         class_id: Optional[str] = Form(None),
+                         user: dict = Depends(require_roles("admin"))):
+    """Bulk-create student accounts from Excel/CSV and place them into classes.
+
+    When `class_id` is given (import launched from inside a class), every row that
+    leaves the 'kelas' column empty is placed into that class.
+    """
+    default_class = None
+    if class_id:
+        default_class = await db.classes.find_one({"id": class_id}, {"_id": 0})
+        if not default_class:
+            raise HTTPException(status_code=404, detail="Kelas tujuan tidak ditemukan")
     raw = await file.read()
     name = (file.filename or "").lower()
     try:
@@ -1133,6 +1345,8 @@ async def import_students(file: UploadFile = File(...), user: dict = Depends(req
         kelas = cell(row, "kelas")
         if not (nama or username or password or nis or kelas):
             continue  # blank row
+        if not kelas and default_class is not None:
+            kelas = default_class["name"]
         if not nama:
             errors.append(f"Baris {rownum}: nama wajib diisi")
             continue
