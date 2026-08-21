@@ -97,3 +97,8 @@ credentials.json
 .credentials
 frontend/node_modules/.cache/default-development/7.pack
 frontend/node_modules/.cache/default-development/0.pack
+
+# keep example env templates (no secrets) for self-hosted deploys
+!.env.example
+!*/.env.example
+!*.env.example

@@ -1,0 +1,30 @@
+# One-click backend deploy on Render (https://render.com).
+# Dashboard -> New -> Blueprint -> pick this repository.
+services:
+  - type: web
+    name: cbt-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements-deploy.txt
+    startCommand: uvicorn server:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/settings/school
+    envVars:
+      - key: MONGO_URL
+        sync: false          # paste your MongoDB Atlas connection string
+      - key: DB_NAME
+        value: cbt_ujian
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      - key: CORS_ORIGINS
+        sync: false          # your Vercel URL, e.g. https://cbt-sekolah.vercel.app
+      - key: STORAGE_MODE
+        value: mongo
+      - key: INTERNAL_CRON_MINUTES
+        value: "5"
+      - key: PYTHON_VERSION
+        value: "3.11.9"

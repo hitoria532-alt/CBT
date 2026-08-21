@@ -6,6 +6,7 @@ import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
 import { Label } from "../../components/ui/label";
 import { Textarea } from "../../components/ui/textarea";
+import BackupPanel from "./BackupPanel";
 
 export const THEMES = [
   { id: "157 35% 18%", name: "Hijau Forest", hex: "#1e3a30" },
@@ -16,10 +17,26 @@ export const THEMES = [
   { id: "25 60% 35%", name: "Cokelat", hex: "#8a4b1e" },
 ];
 
+export const DEFAULT_THEME = THEMES[0].id;
+
+/** Accepts only a valid Tailwind HSL triplet like "157 35% 18%". */
+export function normalizeTheme(value) {
+  if (typeof value !== "string") return null;
+  const v = value.trim();
+  if (/^-?\d+(\.\d+)?\s+\d+(\.\d+)?%\s+\d+(\.\d+)?%$/.test(v)) return v;
+  // Legacy/invalid values (e.g. "green", "#1e3a30") -> try to map by name/hex.
+  const byName = THEMES.find(
+    (t) => t.hex.toLowerCase() === v.toLowerCase() || t.name.toLowerCase() === v.toLowerCase()
+  );
+  if (byName) return byName.id;
+  const legacy = { green: THEMES[0].id, blue: THEMES[1].id, purple: THEMES[2].id, red: THEMES[3].id, teal: THEMES[4].id, brown: THEMES[5].id };
+  return legacy[v.toLowerCase()] || null;
+}
+
 export function applyTheme(hsl) {
-  if (!hsl) return;
-  document.documentElement.style.setProperty("--primary", hsl);
-  document.documentElement.style.setProperty("--ring", hsl);
+  const safe = normalizeTheme(hsl) || DEFAULT_THEME;
+  document.documentElement.style.setProperty("--primary", safe);
+  document.documentElement.style.setProperty("--ring", safe);
 }
 
 export default function SchoolSettings() {
@@ -169,6 +186,8 @@ export default function SchoolSettings() {
           <ShieldCheck className="h-4 w-4 mr-2" />{savingLock ? "Menyimpan..." : "Simpan Mode Ujian"}
         </Button>
       </div>
+
+      <BackupPanel />
     </div>
   );
 }

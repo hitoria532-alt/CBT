@@ -8,6 +8,10 @@ import os
 import io
 import re
 import hmac
+import base64
+import gzip
+import json
+import asyncio
 import logging
 import uuid
 import random
@@ -20,7 +24,7 @@ import requests
 import pandas as pd
 from bson import ObjectId
 from fastapi import (FastAPI, APIRouter, HTTPException, Depends, Request, Response,
-                     UploadFile, File, BackgroundTasks, Header, Query)
+                     UploadFile, File, Form, BackgroundTasks, Header, Query)
 from fastapi.responses import StreamingResponse
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
@@ -37,11 +41,25 @@ api_router = APIRouter(prefix="/api")
 JWT_ALGORITHM = "HS256"
 
 # ------------------------------------------------------------------ object storage
+# Two backends so the app runs both on Emergent and on self-hosted platforms
+# (Render/Railway/VPS) where the Emergent object-storage proxy is unavailable:
+#   STORAGE_MODE=auto (default) -> Emergent proxy when EMERGENT_LLM_KEY is set,
+#                                  otherwise files are kept in MongoDB.
+#   STORAGE_MODE=emergent|mongo -> force one backend.
 STORAGE_BASE = (os.environ.get("INTEGRATION_PROXY_URL") or "").strip() or "https://integrations.emergentagent.com"
 STORAGE_URL = STORAGE_BASE.rstrip("/") + "/objstore/api/v1/storage"
 EMERGENT_KEY = os.environ.get("EMERGENT_LLM_KEY")
+STORAGE_MODE = (os.environ.get("STORAGE_MODE") or "auto").strip().lower()
 APP_NAME = "cbt-ujian"
 _storage_key = None
+
+
+def use_emergent_storage() -> bool:
+    if STORAGE_MODE == "mongo":
+        return False
+    if STORAGE_MODE == "emergent":
+        return True
+    return bool(EMERGENT_KEY)
 
 
 def init_storage(force: bool = False):
@@ -76,6 +94,35 @@ def get_object(path: str):
         resp = requests.get(f"{STORAGE_URL}/objects/{path}", headers={"X-Storage-Key": key}, timeout=60)
     resp.raise_for_status()
     return resp.content, resp.headers.get("Content-Type", "application/octet-stream")
+
+
+async def store_file(path: str, data: bytes, content_type: str) -> dict:
+    """Save an uploaded file with whichever storage backend is available."""
+    if use_emergent_storage():
+        try:
+            return put_object(path, data, content_type)
+        except Exception as e:
+            if STORAGE_MODE == "emergent":
+                raise
+            logging.getLogger(__name__).warning(
+                "Object storage unavailable (%s) — falling back to MongoDB", e)
+    from bson.binary import Binary
+    await db.file_blobs.replace_one(
+        {"path": path},
+        {"path": path, "data": Binary(data), "content_type": content_type,
+         "size": len(data), "created_at": now_iso()},
+        upsert=True)
+    return {"path": path, "size": len(data)}
+
+
+async def load_file(path: str):
+    """Read a stored file: MongoDB copy first, then the Emergent proxy."""
+    doc = await db.file_blobs.find_one({"path": path})
+    if doc is not None:
+        return bytes(doc["data"]), doc.get("content_type", "application/octet-stream")
+    if use_emergent_storage():
+        return get_object(path)
+    raise FileNotFoundError(path)
 
 
 
@@ -276,6 +323,34 @@ class ClassBody(BaseModel):
 class DifficultyBody(BaseModel):
     easy_min: float = 70.0
     medium_min: float = 40.0
+
+
+DEFAULT_THEME_COLOR = "157 35% 18%"
+THEME_HSL_RE = re.compile(r"^-?\d+(\.\d+)?\s+\d+(\.\d+)?%\s+\d+(\.\d+)?%$")
+LEGACY_THEME_MAP = {
+    "green": "157 35% 18%", "#1e3a30": "157 35% 18%",
+    "blue": "215 60% 30%", "#1f4e8c": "215 60% 30%",
+    "purple": "265 45% 40%", "#5b3a94": "265 45% 40%",
+    "red": "0 60% 40%", "#a32626": "0 60% 40%",
+    "teal": "200 70% 30%", "#106688": "200 70% 30%",
+    "brown": "25 60% 35%", "#8a4b1e": "25 60% 35%",
+}
+
+
+def sanitize_theme_color(value: Optional[str]) -> Optional[str]:
+    """Only allow a Tailwind HSL triplet ('157 35% 18%'); map known legacy names.
+
+    An invalid value (e.g. 'green') would produce `hsl(green)` in the browser and
+    make every element that uses --primary render as blank/white text.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    if THEME_HSL_RE.match(v):
+        return v
+    return LEGACY_THEME_MAP.get(v.lower())
 
 
 class SchoolBody(BaseModel):
@@ -863,6 +938,372 @@ async def delete_class(cid: str, user: dict = Depends(require_roles("admin", "gu
     return {"ok": True}
 
 
+# ------------------------------------------------------- CLASS ROSTER (student accounts)
+class ClassStudentCreate(BaseModel):
+    name: str
+    email: EmailStr
+    password: str
+    identifier: Optional[str] = None
+
+
+class AttachStudentsBody(BaseModel):
+    student_ids: List[str] = []
+
+
+async def _get_class_or_404(cid: str) -> dict:
+    cls = await db.classes.find_one({"id": cid}, {"_id": 0})
+    if not cls:
+        raise HTTPException(status_code=404, detail="Kelas tidak ditemukan")
+    return cls
+
+
+async def _class_roster(cls: dict) -> List[dict]:
+    ids = cls.get("student_ids", []) or []
+    oids = []
+    for sid in ids:
+        try:
+            oids.append(ObjectId(sid))
+        except Exception:
+            continue
+    if not oids:
+        return []
+    users = await db.users.find({"_id": {"$in": oids}, "role": "siswa"}).to_list(2000)
+    roster = []
+    for u in users:
+        attempts = await db.attempts.count_documents({"student_id": str(u["_id"]), "status": "selesai"})
+        roster.append({
+            "id": str(u["_id"]),
+            "name": u.get("name", ""),
+            "email": u.get("email", ""),
+            "identifier": u.get("identifier", "") or "",
+            "created_at": u.get("created_at"),
+            "exams_done": attempts,
+        })
+    roster.sort(key=lambda x: x["name"].lower())
+    return roster
+
+
+@api_router.get("/classes/{cid}/students")
+async def list_class_students(cid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Student accounts that belong to this class + students not in any class yet."""
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    member_ids = {s["id"] for s in roster}
+
+    all_classes = await db.classes.find({}, {"_id": 0, "id": 1, "name": 1, "student_ids": 1}).to_list(1000)
+    class_of = {}
+    for c in all_classes:
+        for sid in c.get("student_ids", []) or []:
+            class_of.setdefault(sid, []).append(c["name"])
+
+    others = []
+    async for u in db.users.find({"role": "siswa"}):
+        sid = str(u["_id"])
+        if sid in member_ids:
+            continue
+        others.append({"id": sid, "name": u.get("name", ""), "email": u.get("email", ""),
+                       "identifier": u.get("identifier", "") or "",
+                       "class_names": class_of.get(sid, [])})
+    others.sort(key=lambda x: x["name"].lower())
+    return {"class": {"id": cls["id"], "name": cls["name"], "description": cls.get("description", "")},
+            "students": roster, "available": others}
+
+
+@api_router.post("/classes/{cid}/students")
+async def add_class_student(cid: str, body: ClassStudentCreate,
+                            user: dict = Depends(require_roles("admin"))):
+    """Create a login-ready student account and put it straight into this class."""
+    cls = await _get_class_or_404(cid)
+    email = body.email.lower().strip()
+    if not body.name.strip():
+        raise HTTPException(status_code=400, detail="Nama siswa wajib diisi")
+    if len(body.password or "") < 5:
+        raise HTTPException(status_code=400, detail="Password minimal 5 karakter")
+
+    existing = await db.users.find_one({"email": email})
+    if existing is not None:
+        if existing.get("role") != "siswa":
+            raise HTTPException(status_code=400,
+                                detail=f"Email sudah dipakai akun {existing.get('role')}")
+        raise HTTPException(status_code=400,
+                            detail="Email sudah terdaftar sebagai siswa. Gunakan 'Tambah dari akun yang ada'.")
+
+    doc = {"email": email, "password_hash": hash_password(body.password),
+           "name": body.name.strip(), "role": "siswa",
+           "identifier": (body.identifier or "").strip(), "created_at": now_iso()}
+    res = await db.users.insert_one(doc)
+    sid = str(res.inserted_id)
+    members = list(dict.fromkeys((cls.get("student_ids") or []) + [sid]))
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    return {"id": sid, "name": doc["name"], "email": email,
+            "identifier": doc["identifier"], "exams_done": 0}
+
+
+@api_router.post("/classes/{cid}/students/attach")
+async def attach_class_students(cid: str, body: AttachStudentsBody,
+                                user: dict = Depends(require_roles("admin", "guru"))):
+    """Move/attach existing student accounts into this class."""
+    cls = await _get_class_or_404(cid)
+    valid = []
+    for sid in body.student_ids:
+        try:
+            u = await db.users.find_one({"_id": ObjectId(sid), "role": "siswa"})
+        except Exception:
+            u = None
+        if u:
+            valid.append(sid)
+    members = list(dict.fromkeys((cls.get("student_ids") or []) + valid))
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    return {"added": len(set(valid) - set(cls.get("student_ids") or [])), "total": len(members)}
+
+
+@api_router.delete("/classes/{cid}/students/{sid}")
+async def remove_class_student(cid: str, sid: str, delete_account: bool = False,
+                               user: dict = Depends(require_roles("admin"))):
+    """Remove a student from the class; optionally delete the login account too."""
+    cls = await _get_class_or_404(cid)
+    members = [x for x in (cls.get("student_ids") or []) if x != sid]
+    await db.classes.update_one({"id": cid}, {"$set": {"student_ids": members}})
+    if delete_account:
+        try:
+            await db.users.delete_one({"_id": ObjectId(sid), "role": "siswa"})
+        except Exception:
+            pass
+        await db.classes.update_many({"student_ids": sid}, {"$pull": {"student_ids": sid}})
+    return {"ok": True, "deleted_account": bool(delete_account)}
+
+
+@api_router.get("/classes/{cid}/students/xlsx")
+async def export_class_roster(cid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Excel list of student accounts of a class (name, NIS, username) to hand out."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Akun Siswa"
+    ws.sheet_view.showGridLines = False
+    widths = [6, 34, 20, 38, 16]
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    r = 1
+    if school.get("name"):
+        ws.merge_cells(f"A{r}:E{r}")
+        c = ws.cell(row=r, column=1, value=school["name"].upper())
+        c.font = Font(bold=True, size=13, color=XL_GREEN)
+        r += 1
+    ws.merge_cells(f"A{r}:E{r}")
+    c = ws.cell(row=r, column=1, value=f"Daftar Akun Siswa — {cls['name']}")
+    c.font = Font(bold=True, size=11)
+    r += 2
+
+    headers = ["No", "Nama Siswa", "NIS / NISN", "Username (Email Login)", "Jumlah Ujian"]
+    for i, h in enumerate(headers, start=1):
+        cell = ws.cell(row=r, column=i, value=h)
+        cell.font = Font(bold=True, color="FFFFFF")
+        cell.fill = PatternFill("solid", fgColor=XL_GREEN)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.border = _xl_border()
+    r += 1
+    for idx, s in enumerate(roster, start=1):
+        for i, v in enumerate([idx, s["name"], s["identifier"] or "-", s["email"], s["exams_done"]], start=1):
+            cell = ws.cell(row=r, column=i, value=v)
+            cell.border = _xl_border()
+            if i in (1, 3, 5):
+                cell.alignment = Alignment(horizontal="center")
+        r += 1
+    if not roster:
+        ws.merge_cells(f"A{r}:E{r}")
+        ws.cell(row=r, column=1, value="Belum ada siswa di kelas ini.").alignment = Alignment(horizontal="center")
+        r += 1
+    r += 1
+    ws.merge_cells(f"A{r}:E{r}")
+    note = ws.cell(row=r, column=1,
+                   value="Siswa login memakai Username (Email) dan password yang diberikan admin. "
+                         "Password tidak ditampilkan demi keamanan — gunakan tombol 'Reset Password' bila lupa.")
+    note.alignment = Alignment(wrap_text=True, vertical="top")
+    ws.row_dimensions[r].height = 30
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", cls["name"]).strip("-") or "kelas"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="akun-siswa-{safe}.xlsx"'})
+
+
+# ------------------------------------------------- BULK PASSWORD RESET + LOGIN CARDS
+class ResetPasswordsBody(BaseModel):
+    mode: str = "random"            # "random" (per student) | "same" (one password for all)
+    password: Optional[str] = None  # required when mode == "same"
+    student_ids: List[str] = []     # empty -> every student in the class
+
+
+class CardCredential(BaseModel):
+    name: str = ""
+    email: str = ""
+    identifier: Optional[str] = ""
+    password: Optional[str] = ""
+
+
+class LoginCardsBody(BaseModel):
+    login_url: str = ""
+    include_password: bool = True
+    credentials: List[CardCredential] = []   # empty -> roster with blank password field
+
+
+def _random_password(n: int = 8) -> str:
+    """Readable password: no 0/O/1/l mix-ups, easy to type on a school PC."""
+    alphabet = "abcdefghjkmnpqrstuvwxyz"
+    digits = "23456789"
+    body = "".join(random.choice(alphabet) for _ in range(max(3, n - 3)))
+    return body + "".join(random.choice(digits) for _ in range(3))
+
+
+@api_router.post("/classes/{cid}/students/reset-passwords")
+async def reset_class_passwords(cid: str, body: ResetPasswordsBody,
+                                user: dict = Depends(require_roles("admin"))):
+    """Reset the login password of every (or selected) student of a class in one go."""
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    if body.student_ids:
+        wanted = set(body.student_ids)
+        roster = [s for s in roster if s["id"] in wanted]
+    if not roster:
+        raise HTTPException(status_code=400, detail="Tidak ada siswa di kelas ini")
+
+    mode = (body.mode or "random").lower()
+    if mode not in ("random", "same"):
+        raise HTTPException(status_code=400, detail="Mode tidak valid")
+    if mode == "same":
+        if len(body.password or "") < 5:
+            raise HTTPException(status_code=400, detail="Password minimal 5 karakter")
+
+    creds = []
+    for s in roster:
+        pwd = body.password if mode == "same" else _random_password()
+        try:
+            await db.users.update_one({"_id": ObjectId(s["id"]), "role": "siswa"},
+                                      {"$set": {"password_hash": hash_password(pwd)}})
+        except Exception:
+            continue
+        creds.append({"id": s["id"], "name": s["name"], "email": s["email"],
+                      "identifier": s.get("identifier", ""), "password": pwd})
+
+    return {"count": len(creds), "class_name": cls["name"], "credentials": creds}
+
+
+@api_router.post("/classes/{cid}/students/cards/pdf")
+async def class_login_cards(cid: str, body: LoginCardsBody,
+                            user: dict = Depends(require_roles("admin", "guru"))):
+    """Printable login cards (name / username / password) to hand out to students."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas as pdfcanvas
+
+    cls = await _get_class_or_404(cid)
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    items = [c.model_dump() for c in body.credentials]
+    if not items:
+        items = [{"name": s["name"], "email": s["email"],
+                  "identifier": s.get("identifier", ""), "password": ""}
+                 for s in await _class_roster(cls)]
+    if not items:
+        raise HTTPException(status_code=400, detail="Belum ada siswa di kelas ini")
+
+    buf = io.BytesIO()
+    c = pdfcanvas.Canvas(buf, pagesize=A4)
+    page_w, page_h = A4
+    margin = 12 * mm
+    cols, rows = 2, 5
+    gap = 4 * mm
+    card_w = (page_w - 2 * margin - gap) / cols
+    card_h = (page_h - 2 * margin - (rows - 1) * gap) / rows
+    green = colors.HexColor("#1E3A30")
+    grey = colors.HexColor("#6B7280")
+    line = colors.HexColor("#D9D9CF")
+    login_url = (body.login_url or "").replace("https://", "").replace("http://", "").rstrip("/")
+    school_name = (school.get("name") or "CBT Ujian Online").strip()
+
+    def draw_card(idx, item):
+        pos = idx % (cols * rows)
+        col = pos % cols
+        row = pos // cols
+        x = margin + col * (card_w + gap)
+        y = page_h - margin - (row + 1) * card_h - row * gap
+
+        c.setStrokeColor(line)
+        c.setLineWidth(0.8)
+        c.roundRect(x, y, card_w, card_h, 3 * mm, stroke=1, fill=0)
+
+        # header band
+        c.setFillColor(green)
+        c.roundRect(x, y + card_h - 9 * mm, card_w, 9 * mm, 3 * mm, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 8.5)
+        c.drawString(x + 5 * mm, y + card_h - 6 * mm, school_name.upper()[:38])
+        c.setFont("Helvetica", 7.5)
+        c.drawRightString(x + card_w - 5 * mm, y + card_h - 6 * mm, cls["name"][:22])
+
+        ty = y + card_h - 15 * mm
+        c.setFillColor(grey)
+        c.setFont("Helvetica", 6.5)
+        c.drawString(x + 5 * mm, ty, "KARTU LOGIN SISWA")
+        ty -= 6 * mm
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(x + 5 * mm, ty, (item.get("name") or "-")[:34])
+        if item.get("identifier"):
+            ty -= 4.5 * mm
+            c.setFillColor(grey)
+            c.setFont("Helvetica", 7.5)
+            c.drawString(x + 5 * mm, ty, f"NIS/NISN: {item['identifier']}")
+
+        ty -= 7 * mm
+        for label, value in (("Username", item.get("email") or "-"),
+                             ("Password", (item.get("password") or "") if body.include_password else "")):
+            c.setFillColor(grey)
+            c.setFont("Helvetica", 7)
+            c.drawString(x + 5 * mm, ty, label.upper())
+            c.setFillColor(colors.black)
+            c.setFont("Courier-Bold", 9.5)
+            shown = value if value else "________________"
+            c.drawString(x + 22 * mm, ty - 0.3 * mm, shown[:26])
+            c.setStrokeColor(line)
+            c.setLineWidth(0.4)
+            c.line(x + 5 * mm, ty - 2.2 * mm, x + card_w - 5 * mm, ty - 2.2 * mm)
+            ty -= 7 * mm
+
+        c.setFillColor(grey)
+        c.setFont("Helvetica", 6.5)
+        if login_url:
+            c.drawString(x + 5 * mm, y + 7.5 * mm, f"Buka: {login_url}"[:52])
+            c.drawString(x + 5 * mm, y + 4 * mm, "Masuk dengan username & password di atas.")
+        else:
+            c.drawString(x + 5 * mm, y + 4 * mm, "Masuk ke aplikasi CBT dengan username & password di atas.")
+
+    for i, item in enumerate(items):
+        if i > 0 and i % (cols * rows) == 0:
+            c.showPage()
+        draw_card(i, item)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", cls["name"]).strip("-") or "kelas"
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="kartu-login-{safe}.pdf"'})
+
+
 # ------------------------------------------------------------------ STUDENT IMPORT (Excel)
 STUDENT_COLS = ["nama", "kelas", "nis", "username", "password"]
 STUDENT_COL_HELP = {
@@ -1051,8 +1492,19 @@ async def student_import_template(user: dict = Depends(require_roles("admin", "g
 
 
 @api_router.post("/students/import")
-async def import_students(file: UploadFile = File(...), user: dict = Depends(require_roles("admin"))):
-    """Bulk-create student accounts from Excel/CSV and place them into classes."""
+async def import_students(file: UploadFile = File(...),
+                         class_id: Optional[str] = Form(None),
+                         user: dict = Depends(require_roles("admin"))):
+    """Bulk-create student accounts from Excel/CSV and place them into classes.
+
+    When `class_id` is given (import launched from inside a class), every row that
+    leaves the 'kelas' column empty is placed into that class.
+    """
+    default_class = None
+    if class_id:
+        default_class = await db.classes.find_one({"id": class_id}, {"_id": 0})
+        if not default_class:
+            raise HTTPException(status_code=404, detail="Kelas tujuan tidak ditemukan")
     raw = await file.read()
     name = (file.filename or "").lower()
     try:
@@ -1105,6 +1557,8 @@ async def import_students(file: UploadFile = File(...), user: dict = Depends(req
         kelas = cell(row, "kelas")
         if not (nama or username or password or nis or kelas):
             continue  # blank row
+        if not kelas and default_class is not None:
+            kelas = default_class["name"]
         if not nama:
             errors.append(f"Baris {rownum}: nama wajib diisi")
             continue
@@ -1425,7 +1879,7 @@ async def upload_image(file: UploadFile = File(...), user: dict = Depends(requir
     ct = ALLOWED_IMG[ext]
     path = f"{APP_NAME}/questions/{user['id']}/{new_id()}.{ext}"
     try:
-        result = put_object(path, data, ct)
+        result = await store_file(path, data, ct)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Gagal mengunggah gambar: {e}")
     await db.files.insert_one({
@@ -1453,7 +1907,7 @@ async def get_file(path: str, authorization: Optional[str] = Header(None), auth:
     if not record:
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
     try:
-        data, content_type = get_object(path)
+        data, content_type = await load_file(path)
     except Exception:
         raise HTTPException(status_code=404, detail="File tidak ditemukan")
     return Response(content=data, media_type=record.get("content_type", content_type))
@@ -2413,22 +2867,25 @@ async def get_school():
     """Public: school identity/theme is needed to brand the login screen."""
     doc = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
     return {"name": doc.get("name", ""), "address": doc.get("address", ""),
-            "logo_path": doc.get("logo_path"), "theme_color": doc.get("theme_color")}
+            "logo_path": doc.get("logo_path"),
+            "theme_color": sanitize_theme_color(doc.get("theme_color")) or DEFAULT_THEME_COLOR}
 
 
 @api_router.put("/settings/school")
 async def set_school(body: SchoolBody, user: dict = Depends(require_roles("admin"))):
-    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **body.model_dump()}}, upsert=True)
-    return body.model_dump()
+    payload = body.model_dump()
+    payload["theme_color"] = sanitize_theme_color(payload.get("theme_color")) or DEFAULT_THEME_COLOR
+    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **payload}}, upsert=True)
+    return payload
 
 
-def _logo_flowable(logo_path):
+async def _logo_flowable(logo_path):
     from reportlab.platypus import Image
     from reportlab.lib.units import mm
     try:
         if not logo_path:
             return None
-        data, _ = get_object(logo_path)
+        data, _ = await load_file(logo_path)
         return Image(io.BytesIO(data), width=18 * mm, height=18 * mm)
     except Exception:
         return None
@@ -2445,7 +2902,7 @@ async def _school_kop(styles, green, sub):
         txt.append(Paragraph(school["name"], ParagraphStyle("sn", parent=styles["Title"], textColor=green, fontSize=15, spaceAfter=0)))
     if school.get("address"):
         txt.append(Paragraph(school["address"], sub))
-    logo = _logo_flowable(school.get("logo_path"))
+    logo = await _logo_flowable(school.get("logo_path"))
     if logo:
         t = Table([[logo, txt]], colWidths=[22 * 2.83, None])
         t.setStyle(TableStyle([("VALIGN", (0, 0), (-1, -1), "MIDDLE"), ("LEFTPADDING", (0, 0), (0, 0), 0)]))
@@ -2698,15 +3155,178 @@ async def export_leaderboard(start: Optional[str] = None, end: Optional[str] = N
         headers={"Content-Disposition": "attachment; filename=peringkat-angkatan.xlsx"})
 
 
+# ------------------------------------------------------------------ BACKUP / RESTORE
+BACKUP_COLLECTIONS = ["users", "classes", "categories", "questions", "packages",
+                      "sessions", "attempts", "settings", "files", "file_blobs"]
+BACKUP_VERSION = 1
+
+
+def _encode_doc(doc: dict) -> dict:
+    """Make a Mongo document JSON-safe (ObjectId -> str, Binary -> base64)."""
+    from bson.binary import Binary
+    out = {}
+    for k, v in doc.items():
+        if k == "_id":
+            out["_id"] = str(v)
+        elif isinstance(v, (Binary, bytes)):
+            out[k] = {"__b64__": base64.b64encode(bytes(v)).decode("ascii")}
+        elif isinstance(v, datetime):
+            out[k] = v.isoformat()
+        elif isinstance(v, dict):
+            out[k] = _encode_doc(v)
+        elif isinstance(v, list):
+            out[k] = [_encode_doc(x) if isinstance(x, dict) else x for x in v]
+        else:
+            out[k] = v
+    return out
+
+
+def _decode_doc(doc: dict) -> dict:
+    from bson.binary import Binary
+    out = {}
+    for k, v in doc.items():
+        if k == "_id":
+            try:
+                out["_id"] = ObjectId(v)
+            except Exception:
+                out["_id"] = v
+        elif isinstance(v, dict) and "__b64__" in v:
+            out[k] = Binary(base64.b64decode(v["__b64__"]))
+        elif isinstance(v, dict):
+            out[k] = _decode_doc(v)
+        elif isinstance(v, list):
+            out[k] = [_decode_doc(x) if isinstance(x, dict) else x for x in v]
+        else:
+            out[k] = v
+    return out
+
+
+@api_router.get("/backup/stats")
+async def backup_stats(user: dict = Depends(require_roles("admin"))):
+    """How much data a backup would contain (shown before downloading)."""
+    counts = {}
+    for name in BACKUP_COLLECTIONS:
+        counts[name] = await db[name].count_documents({})
+    blob_size = 0
+    async for b in db.file_blobs.find({}, {"size": 1}):
+        blob_size += int(b.get("size") or 0)
+    return {"counts": counts, "files_bytes": blob_size,
+            "students": await db.users.count_documents({"role": "siswa"}),
+            "teachers": await db.users.count_documents({"role": "guru"})}
+
+
+@api_router.get("/backup/export")
+async def backup_export(user: dict = Depends(require_roles("admin"))):
+    """Download the whole school database (accounts, questions, results, images)."""
+    payload = {"version": BACKUP_VERSION, "app": APP_NAME,
+               "exported_at": now_iso(), "collections": {}}
+    for name in BACKUP_COLLECTIONS:
+        docs = await db[name].find({}).to_list(200000)
+        payload["collections"][name] = [_encode_doc(d) for d in docs]
+    raw = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    gz = gzip.compress(raw, compresslevel=6)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
+    return StreamingResponse(
+        io.BytesIO(gz), media_type="application/gzip",
+        headers={"Content-Disposition": f'attachment; filename="backup-cbt-{stamp}.json.gz"'})
+
+
+@api_router.post("/backup/import")
+async def backup_import(file: UploadFile = File(...), mode: str = Form("merge"),
+                        user: dict = Depends(require_roles("admin"))):
+    """Restore a backup file.
+
+    mode=merge   -> insert/overwrite documents from the file, keep everything else
+    mode=replace -> wipe the collections in the file first (full restore)
+    """
+    mode = (mode or "merge").lower()
+    if mode not in ("merge", "replace"):
+        raise HTTPException(status_code=400, detail="Mode harus 'merge' atau 'replace'")
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="File kosong")
+    try:
+        if raw[:2] == b"\x1f\x8b":
+            raw = gzip.decompress(raw)
+        payload = json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"File backup tidak valid: {e}")
+
+    cols = payload.get("collections")
+    if not isinstance(cols, dict) or not cols:
+        raise HTTPException(status_code=400, detail="File backup tidak memuat data")
+    unknown = [k for k in cols if k not in BACKUP_COLLECTIONS]
+    if unknown:
+        raise HTTPException(status_code=400,
+                            detail=f"File backup memuat data tak dikenal: {', '.join(unknown)}")
+
+    report = {}
+    for name, docs in cols.items():
+        if mode == "replace":
+            await db[name].delete_many({})
+        inserted = updated = 0
+        for d in docs:
+            doc = _decode_doc(d)
+            key = None
+            if "_id" in doc:
+                key = {"_id": doc["_id"]}
+            elif "id" in doc:
+                key = {"id": doc["id"]}
+            elif name == "settings" and "key" in doc:
+                key = {"key": doc["key"]}
+            elif name == "file_blobs" and "path" in doc:
+                key = {"path": doc["path"]}
+            if key is None:
+                await db[name].insert_one(doc)
+                inserted += 1
+                continue
+            existing = await db[name].find_one(key, {"_id": 1})
+            body = {k: v for k, v in doc.items() if k != "_id"}
+            if existing is None:
+                await db[name].insert_one(doc)
+                inserted += 1
+            else:
+                await db[name].update_one(key, {"$set": body})
+                updated += 1
+        report[name] = {"inserted": inserted, "updated": updated}
+
+    return {"mode": mode, "version": payload.get("version"),
+            "exported_at": payload.get("exported_at"), "result": report}
+
+
 # ------------------------------------------------------------------ startup
+# Self-hosted deployments have no Emergent cron, so an in-process loop can
+# finalise expired exam attempts. Enable with INTERNAL_CRON_MINUTES=5 (0 = off).
+INTERNAL_CRON_MINUTES = int(os.environ.get("INTERNAL_CRON_MINUTES", "0") or 0)
+
+
+async def _internal_cron_loop():
+    log = logging.getLogger(__name__)
+    log.info("Internal auto-submit scheduler every %s minute(s)", INTERNAL_CRON_MINUTES)
+    while True:
+        try:
+            await asyncio.sleep(INTERNAL_CRON_MINUTES * 60)
+            await run_auto_submit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.error("Internal auto-submit failed: %s", e)
+
+
 @app.on_event("startup")
 async def startup():
     await db.users.create_index("email", unique=True)
-    try:
-        init_storage()
-        logger.info("Object storage initialized")
-    except Exception as e:
-        logging.getLogger(__name__).error(f"Storage init failed: {e}")
+    await db.file_blobs.create_index("path", unique=True)
+    if use_emergent_storage():
+        try:
+            init_storage()
+            logger.info("Object storage initialized")
+        except Exception as e:
+            logging.getLogger(__name__).warning(
+                f"Storage init failed ({e}) — uploads will be stored in MongoDB")
+    else:
+        logger.info("Object storage: MongoDB (self-hosted mode)")
     admin_email = os.environ.get("ADMIN_EMAIL", "admin@example.com").lower()
     admin_password = os.environ.get("ADMIN_PASSWORD", "admin123")
     existing = await db.users.find_one({"email": admin_email})
@@ -2719,6 +3339,8 @@ async def startup():
     elif not verify_password(admin_password, existing["password_hash"]):
         await db.users.update_one({"email": admin_email},
                                   {"$set": {"password_hash": hash_password(admin_password)}})
+    if INTERNAL_CRON_MINUTES > 0:
+        asyncio.create_task(_internal_cron_loop())
 
 
 app.include_router(api_router)

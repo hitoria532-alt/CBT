@@ -1,0 +1,79 @@
+{
+  "summary": "Bug fix verification completed: sidebar menu labels and hero banner text are now visible with proper contrast across all themes. The theme_color sanitization is working correctly on both backend and frontend.",
+  "backend_issues": {
+    "critical_bugs": [],
+    "minor_bugs": [
+      {
+        "endpoint": "/api/notifications",
+        "issue": "Returns 403 Forbidden",
+        "impact": "Notifications feature not accessible",
+        "fix_priority": "LOW",
+        "note": "Unrelated to theme color bug"
+      }
+    ]
+  },
+  "frontend_issues": {
+    "ui_bugs": [],
+    "integration_issues": [],
+    "design_issues": []
+  },
+  "passed_tests": [
+    "Backend: GET /api/settings/school returns valid HSL triplet '157 35% 18%'",
+    "Backend: PUT with legacy 'green' sanitized to '157 35% 18%'",
+    "Backend: PUT with hex '#1e3a30' sanitized to '157 35% 18%'",
+    "Backend: PUT with invalid 'not-a-color' sanitized to '157 35% 18%'",
+    "Backend: PUT with valid HSL '215 60% 30%' preserved correctly",
+    "Backend: Student exam flow (create, login, start, submit, results)",
+    "Frontend: Admin login successful",
+    "Frontend: CSS --primary variable is valid HSL triplet",
+    "Frontend: All sidebar menu labels visible (Dashboard, Kategori Materi, Bank Soal, Paket Soal, Sesi Pelaksanaan, Manajemen Kelas, Hasil & Koreksi, Peringkat Kelas, Pengaturan Sekolah, Manajemen Akun)",
+    "Frontend: Active menu item (Dashboard) has proper contrast - white text on primary background",
+    "Frontend: Inactive menu items have proper contrast - muted foreground color",
+    "Frontend: Theme switching to Blue theme - --primary changed to '215 60% 30%' (valid HSL)",
+    "Frontend: Theme switching to Purple theme - --primary changed to '265 45% 40%' (valid HSL)",
+    "Frontend: Dashboard link remained visible after theme changes",
+    "Frontend: Hero banner text 'SELAMAT DATANG' visible with all themes",
+    "Frontend: Hero banner text 'Dashboard CBT Ujian' visible with all themes",
+    "Frontend: Navigation to Dashboard, Kategori Materi, Bank Soal, Hasil & Koreksi",
+    "Frontend: Dashboard stats and charts render correctly",
+    "Frontend: Logout successful"
+  ],
+  "test_report_links": [
+    "/app/backend_test.py",
+    "/app/.screenshots/menu_visibility_check.png",
+    "/app/.screenshots/purple_theme_dashboard.png"
+  ],
+  "success_percentage": {
+    "backend": "98.4% (63/64 tests passed)",
+    "frontend": "100% (all critical UI elements visible and functional)"
+  },
+  "updated_files": [
+    "/app/backend_test.py"
+  ],
+  "action_item_for_main_agent": "",
+  "should_call_test_agent_after_fix": false,
+  "should_main_agent_test_itself": false,
+  "bug_fix_verification": {
+    "bug_description": "Sidebar menu labels and hero banner text turned blank white (invisible) in admin dashboard due to invalid CSS var --primary being set to 'green' instead of valid HSL triplet",
+    "root_cause": "Previous test run saved theme_color='green' via PUT /api/settings/school. applyTheme() set --primary: green, but Tailwind uses hsl(var(--primary)) so hsl(green) is invalid, causing elements using primary color to render blank/white text",
+    "fix_implemented": [
+      "Backend: Added sanitize_theme_color() function to validate HSL triplets and map legacy color names/hex to valid HSL",
+      "Backend: Applied sanitization on both GET and PUT /api/settings/school endpoints",
+      "Frontend: Added normalizeTheme() function with DEFAULT_THEME guard in applyTheme()",
+      "Database: Corrected bad theme_color value"
+    ],
+    "verification_results": {
+      "computed_css_primary": "157 35% 18% (valid HSL triplet)",
+      "menu_labels_visible": true,
+      "hero_banner_visible": true,
+      "theme_switching_works": true,
+      "all_themes_tested": [
+        "Hijau Forest (157 35% 18%)",
+        "Biru (215 60% 30%)",
+        "Ungu (265 45% 40%)"
+      ],
+      "contrast_check": "All menu labels and hero text have proper contrast with backgrounds"
+    },
+    "status": "FIXED AND VERIFIED"
+  }
+}
