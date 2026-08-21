@@ -259,6 +259,23 @@ class SessionBody(BaseModel):
     announcement: Optional[str] = ""
 
 
+class MakeupBody(BaseModel):
+    """Jadwalkan ujian susulan untuk satu atau beberapa siswa pada sebuah sesi."""
+    session_id: str
+    student_ids: List[str]
+    start_time: str
+    end_time: str
+    duration_minutes: Optional[int] = None  # None = ikut durasi sesi induk
+    reason: Optional[str] = ""
+
+
+class MakeupUpdateBody(BaseModel):
+    start_time: str
+    end_time: str
+    duration_minutes: Optional[int] = None
+    reason: Optional[str] = ""
+
+
 class SchoolClass(BaseModel):
     id: str = Field(default_factory=new_id)
     name: str
@@ -372,7 +389,10 @@ async def update_user(user_id: str, body: UserUpdate, user: dict = Depends(requi
 
 @api_router.delete("/users/{user_id}")
 async def delete_user(user_id: str, user: dict = Depends(require_roles("admin"))):
+    target = await db.users.find_one({"_id": ObjectId(user_id)}, {"_id": 0, "id": 1})
     await db.users.delete_one({"_id": ObjectId(user_id)})
+    if target and target.get("id"):
+        await db.makeups.delete_many({"student_id": target["id"]})
     return {"ok": True}
 
 
@@ -546,19 +566,44 @@ async def list_sessions(user: dict = Depends(get_current_user)):
     if user["role"] == "siswa":
         my_classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)
         my_class_ids = {c["id"] for c in my_classes}
+        my_makeups = await db.makeups.find({"student_id": user["id"]}, {"_id": 0}).to_list(500)
+        mmap = {m["session_id"]: m for m in my_makeups}
         visible = []
         for s in sessions:
             targets = s.get("class_ids") or []
-            if targets and not (set(targets) & my_class_ids):
+            mk = mmap.get(s["id"])
+            # Jadwal susulan juga memberi hak akses meski siswa di luar kelas target.
+            if targets and not (set(targets) & my_class_ids) and not mk:
                 continue
             att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]}, {"_id": 0})
             s["attempt_status"] = att["status"] if att else None
+            if mk:
+                mk_status = window_status(mk["start_time"], mk["end_time"])
+                done_here = bool(att and att.get("makeup_id") == mk["id"] and att["status"] != "berlangsung")
+                s["makeup"] = {
+                    "id": mk["id"], "start_time": mk["start_time"], "end_time": mk["end_time"],
+                    "duration_minutes": mk.get("duration_minutes") or s["duration_minutes"],
+                    "reason": mk.get("reason", ""),
+                    "status": "sudah_dikerjakan" if done_here else mk_status,
+                }
+                # Sesi tetap bisa dibuka bila salah satu jendela (reguler / susulan) aktif.
+                if s["status"] != "berlangsung" and mk_status == "berlangsung":
+                    s["status"] = "berlangsung"
+                    s["active_window"] = "susulan"
+                elif s["status"] == "berlangsung":
+                    s["active_window"] = "sesi"
+                elif s["status"] == "selesai" and mk_status == "akan_datang":
+                    s["status"] = "akan_datang"
+                if s["status"] == "berlangsung" and s.get("active_window") == "susulan":
+                    s["effective_end_time"] = mk["end_time"]
+                    s["effective_duration"] = mk.get("duration_minutes") or s["duration_minutes"]
             visible.append(s)
         return visible
     else:
         for s in sessions:
             classes = await db.classes.find({"id": {"$in": s.get("class_ids", [])}}, {"_id": 0, "name": 1}).to_list(100)
             s["class_names"] = [c["name"] for c in classes]
+            s["makeup_count"] = await db.makeups.count_documents({"session_id": s["id"]})
     return sessions
 
 
@@ -578,6 +623,236 @@ async def update_session(sid: str, body: SessionBody, user: dict = Depends(requi
 @api_router.delete("/sessions/{sid}")
 async def delete_session(sid: str, user: dict = Depends(require_roles("admin", "guru"))):
     await db.sessions.delete_one({"id": sid})
+    # Cascade: tanpa ini, attempt & susulan yatim terus terhitung pada dashboard/stats.
+    res = await db.attempts.delete_many({"session_id": sid})
+    await db.makeups.delete_many({"session_id": sid})
+    return {"ok": True, "attempts_deleted": res.deleted_count}
+
+
+# ------------------------------------------------------------------ MAKEUP EXAMS (ujian susulan)
+def window_status(start_iso: str, end_iso: str, now: Optional[datetime] = None) -> str:
+    """akan_datang | berlangsung | selesai untuk sebuah rentang waktu."""
+    now = now or datetime.now(timezone.utc)
+    try:
+        start = datetime.fromisoformat(start_iso)
+        end = datetime.fromisoformat(end_iso)
+    except Exception:
+        return "selesai"
+    if now < start:
+        return "akan_datang"
+    if now > end:
+        return "selesai"
+    return "berlangsung"
+
+
+async def eligible_student_ids(session: dict) -> List[str]:
+    """Siswa yang menjadi peserta sesi: anggota kelas target, atau semua siswa bila kosong."""
+    targets = session.get("class_ids") or []
+    if not targets:
+        users = await db.users.find({"role": "siswa"}, {"_id": 1}).to_list(5000)
+        return [str(u["_id"]) for u in users]
+    classes = await db.classes.find({"id": {"$in": targets}}, {"_id": 0, "student_ids": 1}).to_list(500)
+    ids, seen = [], set()
+    for c in classes:
+        for sid in c.get("student_ids") or []:
+            if sid not in seen:
+                seen.add(sid)
+                ids.append(sid)
+    return ids
+
+
+async def find_students_by_ids(ids: List[str]) -> List[dict]:
+    """Ambil dokumen siswa dari daftar id string (ObjectId), dikembalikan via clean_user."""
+    oids = []
+    for i in ids:
+        try:
+            oids.append(ObjectId(i))
+        except Exception:
+            continue
+    if not oids:
+        return []
+    docs = await db.users.find({"_id": {"$in": oids}, "role": "siswa"}).to_list(5000)
+    return [clean_user(d) for d in docs]
+
+
+async def get_makeup(session_id: str, student_id: str) -> Optional[dict]:
+    return await db.makeups.find_one({"session_id": session_id, "student_id": student_id}, {"_id": 0})
+
+
+async def enrich_makeup(mk: dict, session: Optional[dict] = None) -> dict:
+    """Tambahkan judul sesi, durasi efektif, dan status pengerjaan."""
+    if session is None:
+        session = await db.sessions.find_one({"id": mk["session_id"]}, {"_id": 0})
+    mk["session_title"] = session["title"] if session else "-"
+    mk["session_start_time"] = session["start_time"] if session else None
+    mk["session_end_time"] = session["end_time"] if session else None
+    mk["effective_duration"] = mk.get("duration_minutes") or (session.get("duration_minutes", 60) if session else 60)
+    att = await db.attempts.find_one(
+        {"session_id": mk["session_id"], "student_id": mk["student_id"]},
+        {"_id": 0, "status": 1, "score": 1, "makeup_id": 1, "submitted_at": 1})
+    mk["attempt_status"] = att["status"] if att else None
+    mk["score"] = att.get("score") if att else None
+    done_here = bool(att and att.get("makeup_id") == mk["id"] and att["status"] != "berlangsung")
+    if done_here:
+        mk["status"] = "sudah_dikerjakan"
+    else:
+        mk["status"] = window_status(mk["start_time"], mk["end_time"])
+    return mk
+
+
+@api_router.get("/makeups")
+async def list_makeups(session_id: Optional[str] = None,
+                       user: dict = Depends(require_roles("admin", "guru"))):
+    q = {"session_id": session_id} if session_id else {}
+    items = await db.makeups.find(q, {"_id": 0}).sort("start_time", -1).to_list(2000)
+    cache: dict = {}
+    for mk in items:
+        sid = mk["session_id"]
+        if sid not in cache:
+            cache[sid] = await db.sessions.find_one({"id": sid}, {"_id": 0})
+        await enrich_makeup(mk, cache[sid])
+    return items
+
+
+@api_router.get("/makeups/summary")
+async def makeups_summary(user: dict = Depends(require_roles("admin", "guru"))):
+    """Jumlah susulan terjadwal per sesi — untuk badge di daftar sesi."""
+    items = await db.makeups.find({}, {"_id": 0, "session_id": 1}).to_list(5000)
+    counts: dict = {}
+    for mk in items:
+        counts[mk["session_id"]] = counts.get(mk["session_id"], 0) + 1
+    return counts
+
+
+@api_router.get("/makeups/me")
+async def my_makeups(user: dict = Depends(require_roles("siswa"))):
+    items = await db.makeups.find({"student_id": user["id"]}, {"_id": 0}).sort("start_time", -1).to_list(500)
+    for mk in items:
+        await enrich_makeup(mk)
+    return items
+
+
+@api_router.get("/makeups/absentees/{session_id}")
+async def session_absentees(session_id: str, user: dict = Depends(require_roles("admin", "guru"))):
+    """Siswa peserta sesi yang belum menyelesaikan ujian — kandidat ujian susulan."""
+    session = await db.sessions.find_one({"id": session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    await enrich_session(session)
+    ids = await eligible_student_ids(session)
+    if not ids:
+        return {"session": session, "absentees": []}
+    students = await find_students_by_ids(ids)
+    students.sort(key=lambda s: (s.get("name") or "").lower())
+    attempts = await db.attempts.find(
+        {"session_id": session_id, "student_id": {"$in": ids}}, {"_id": 0}).to_list(5000)
+    amap = {a["student_id"]: a for a in attempts}
+    makeups = await db.makeups.find({"session_id": session_id}, {"_id": 0}).to_list(2000)
+    mmap = {m["student_id"]: m for m in makeups}
+    out = []
+    for s in students:
+        att = amap.get(s["id"])
+        if att and att["status"] != "berlangsung" and att.get("makeup_id") is None and att.get("score") is not None:
+            # sudah mengerjakan pada jadwal reguler dan sudah bernilai
+            continue
+        if att and att["status"] != "berlangsung" and att.get("makeup_id"):
+            continue  # sudah menyelesaikan susulan
+        mk = mmap.get(s["id"])
+        if att is None:
+            reason_hint = "Tidak hadir / belum memulai ujian"
+        elif att["status"] == "berlangsung":
+            reason_hint = "Sudah memulai tetapi belum dikumpulkan"
+        else:
+            reason_hint = "Dikumpulkan tanpa nilai"
+        out.append({
+            "id": s["id"], "name": s["name"], "identifier": s.get("identifier", ""),
+            "email": s.get("email", ""),
+            "has_attempt": att is not None,
+            "attempt_status": att["status"] if att else None,
+            "reason_hint": reason_hint,
+            "makeup": await enrich_makeup(dict(mk), session) if mk else None,
+        })
+    return {"session": session, "absentees": out}
+
+
+@api_router.post("/makeups")
+async def create_makeups(body: MakeupBody, user: dict = Depends(require_roles("admin", "guru"))):
+    session = await db.sessions.find_one({"id": body.session_id}, {"_id": 0})
+    if not session:
+        raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
+    if not body.student_ids:
+        raise HTTPException(status_code=400, detail="Pilih minimal satu siswa")
+    try:
+        start = datetime.fromisoformat(body.start_time)
+        end = datetime.fromisoformat(body.end_time)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Format waktu tidak valid")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="Waktu selesai harus setelah waktu mulai")
+    if body.duration_minutes is not None and body.duration_minutes < 1:
+        raise HTTPException(status_code=400, detail="Durasi minimal 1 menit")
+
+    students = await find_students_by_ids(body.student_ids)
+    smap = {s["id"]: s for s in students}
+    created, updated, skipped = 0, 0, []
+    for sid in body.student_ids:
+        st = smap.get(sid)
+        if not st:
+            skipped.append({"student_id": sid, "reason": "Akun siswa tidak ditemukan"})
+            continue
+        doc = {
+            "session_id": body.session_id,
+            "student_id": sid,
+            "student_name": st["name"],
+            "student_identifier": st.get("identifier", ""),
+            "start_time": body.start_time,
+            "end_time": body.end_time,
+            "duration_minutes": body.duration_minutes,
+            "reason": (body.reason or "").strip(),
+            "created_by": user["id"],
+            "created_by_name": user["name"],
+            "created_at": now_iso(),
+        }
+        existing = await get_makeup(body.session_id, sid)
+        if existing:
+            await db.makeups.update_one({"id": existing["id"]}, {"$set": {
+                k: v for k, v in doc.items() if k not in ("created_at", "created_by", "created_by_name")}})
+            updated += 1
+        else:
+            doc["id"] = new_id()
+            await db.makeups.insert_one(dict(doc))
+            created += 1
+    return {"created": created, "updated": updated, "skipped": skipped}
+
+
+@api_router.put("/makeups/{mid}")
+async def update_makeup(mid: str, body: MakeupUpdateBody,
+                        user: dict = Depends(require_roles("admin", "guru"))):
+    mk = await db.makeups.find_one({"id": mid}, {"_id": 0})
+    if not mk:
+        raise HTTPException(status_code=404, detail="Jadwal susulan tidak ditemukan")
+    try:
+        start = datetime.fromisoformat(body.start_time)
+        end = datetime.fromisoformat(body.end_time)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Format waktu tidak valid")
+    if end <= start:
+        raise HTTPException(status_code=400, detail="Waktu selesai harus setelah waktu mulai")
+    if body.duration_minutes is not None and body.duration_minutes < 1:
+        raise HTTPException(status_code=400, detail="Durasi minimal 1 menit")
+    await db.makeups.update_one({"id": mid}, {"$set": {
+        "start_time": body.start_time, "end_time": body.end_time,
+        "duration_minutes": body.duration_minutes, "reason": (body.reason or "").strip()}})
+    fresh = await db.makeups.find_one({"id": mid}, {"_id": 0})
+    return await enrich_makeup(fresh)
+
+
+@api_router.delete("/makeups/{mid}")
+async def delete_makeup(mid: str, user: dict = Depends(require_roles("admin", "guru"))):
+    mk = await db.makeups.find_one({"id": mid}, {"_id": 0})
+    if not mk:
+        raise HTTPException(status_code=404, detail="Jadwal susulan tidak ditemukan")
+    await db.makeups.delete_one({"id": mid})
     return {"ok": True}
 
 
@@ -598,14 +873,35 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     if not session:
         raise HTTPException(status_code=404, detail="Sesi tidak ditemukan")
     await enrich_session(session)
-    if session["status"] == "akan_datang":
-        raise HTTPException(status_code=400, detail="Sesi belum dimulai")
-    if session["status"] == "selesai":
+
+    # Jendela aktif: jadwal reguler sesi, atau jadwal ujian susulan milik siswa ini.
+    mk = await get_makeup(body.session_id, user["id"])
+    mk_status = window_status(mk["start_time"], mk["end_time"]) if mk else None
+    if session["status"] == "berlangsung":
+        window = "sesi"
+        eff_end = session["end_time"]
+        eff_duration = session.get("duration_minutes", 60)
+    elif mk and mk_status == "berlangsung":
+        window = "susulan"
+        eff_end = mk["end_time"]
+        eff_duration = mk.get("duration_minutes") or session.get("duration_minutes", 60)
+    else:
+        if mk and mk_status == "akan_datang":
+            raise HTTPException(status_code=400,
+                                detail="Ujian susulan Anda belum dimulai. Silakan kembali sesuai jadwal susulan.")
+        if mk and mk_status == "selesai":
+            raise HTTPException(status_code=400, detail="Jadwal ujian susulan Anda sudah berakhir")
+        if session["status"] == "akan_datang":
+            raise HTTPException(status_code=400, detail="Sesi belum dimulai")
         raise HTTPException(status_code=400, detail="Sesi sudah berakhir")
 
     attempt = await db.attempts.find_one({"session_id": body.session_id, "student_id": user["id"]}, {"_id": 0})
+    retake = False
     if attempt and attempt["status"] != "berlangsung":
-        raise HTTPException(status_code=400, detail="Anda sudah mengerjakan sesi ini")
+        if window == "susulan" and attempt.get("makeup_id") != mk["id"]:
+            retake = True  # pengerjaan lama diarsipkan, siswa mengerjakan ulang lewat susulan
+        else:
+            raise HTTPException(status_code=400, detail="Anda sudah mengerjakan sesi ini")
 
     pkg = await db.packages.find_one({"id": session["package_id"]}, {"_id": 0})
     if not pkg:
@@ -613,17 +909,39 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     questions = await db.questions.find({"id": {"$in": pkg.get("question_ids", [])}}, {"_id": 0}).to_list(2000)
     qmap = {q["id"]: q for q in questions}
 
-    if not attempt:
-        order_ids = list(pkg.get("question_ids", []))
+    def build_order():
+        order = list(pkg.get("question_ids", []))
         if pkg.get("shuffle_questions"):
-            random.shuffle(order_ids)
-        option_perm = {}
+            random.shuffle(order)
+        perm = {}
         if pkg.get("shuffle_options"):
             for q in questions:
                 if q["type"] == "pg" and q.get("options"):
                     idxs = list(range(len(q["options"])))
                     random.shuffle(idxs)
-                    option_perm[q["id"]] = idxs
+                    perm[q["id"]] = idxs
+        return order, perm
+
+    if retake:
+        order_ids, option_perm = build_order()
+        history = list(attempt.get("previous_attempts") or [])
+        history.append({
+            "score": attempt.get("score"), "status": attempt["status"],
+            "submitted_at": attempt.get("submitted_at"), "started_at": attempt.get("started_at"),
+            "answers": attempt.get("answers", {}), "violations": attempt.get("violations", []),
+        })
+        reset = {
+            "answers": {}, "details": [], "status": "berlangsung", "score": None,
+            "earned": None, "total_possible": None, "needs_grading": False,
+            "started_at": now_iso(), "submitted_at": None, "violations": [],
+            "auto_submitted_reason": None, "question_order": order_ids, "option_perm": option_perm,
+            "is_makeup": True, "makeup_id": mk["id"], "effective_end": eff_end,
+            "effective_duration": eff_duration, "previous_attempts": history,
+        }
+        await db.attempts.update_one({"id": attempt["id"]}, {"$set": reset})
+        attempt = {**attempt, **reset}
+    elif not attempt:
+        order_ids, option_perm = build_order()
         attempt = {
             "id": new_id(), "session_id": body.session_id, "student_id": user["id"],
             "student_name": user["name"], "student_identifier": user.get("identifier", ""),
@@ -631,8 +949,18 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
             "score": None, "started_at": now_iso(), "submitted_at": None,
             "needs_grading": False, "question_order": order_ids, "option_perm": option_perm,
             "violations": [],
+            "is_makeup": window == "susulan",
+            "makeup_id": mk["id"] if window == "susulan" else None,
+            "effective_end": eff_end, "effective_duration": eff_duration,
         }
         await db.attempts.insert_one(dict(attempt))
+    else:
+        # melanjutkan pengerjaan yang sedang berlangsung — segarkan batas waktu efektif
+        await db.attempts.update_one({"id": attempt["id"]}, {"$set": {
+            "effective_end": eff_end, "effective_duration": eff_duration,
+            "is_makeup": window == "susulan" or bool(attempt.get("is_makeup")),
+            "makeup_id": mk["id"] if window == "susulan" else attempt.get("makeup_id"),
+        }})
 
     order_ids = attempt.get("question_order") or list(pkg.get("question_ids", []))
     option_perm = attempt.get("option_perm", {})
@@ -642,12 +970,13 @@ async def start_exam(body: StartAttemptBody, user: dict = Depends(require_roles(
     return {
         "attempt_id": attempt["id"],
         "session": {"id": session["id"], "title": session["title"],
-                    "duration_minutes": session["duration_minutes"], "end_time": session["end_time"]},
+                    "duration_minutes": eff_duration, "end_time": eff_end},
         "started_at": attempt["started_at"],
         "answers": attempt.get("answers", {}),
         "questions": display,
         "lock": lock,
         "violations": len(attempt.get("violations", [])),
+        "is_makeup": window == "susulan",
     }
 
 
@@ -1653,12 +1982,15 @@ async def run_auto_submit():
         session = await db.sessions.find_one({"id": att["session_id"]}, {"_id": 0})
         if not session:
             continue
+        # Batas waktu efektif: jendela susulan bila attempt dibuat lewat susulan.
+        end_iso = att.get("effective_end") or session["end_time"]
+        duration = att.get("effective_duration") or session.get("duration_minutes", 60)
         try:
-            end = datetime.fromisoformat(session["end_time"])
+            end = datetime.fromisoformat(end_iso)
             started = datetime.fromisoformat(att["started_at"])
         except Exception:
             continue
-        deadline = min(end, started + timedelta(minutes=session.get("duration_minutes", 60)))
+        deadline = min(end, started + timedelta(minutes=duration))
         if now >= deadline:
             await finalize_attempt(att, att.get("answers", {}))
             count += 1
@@ -1916,7 +2248,7 @@ async def export_session_results(session_id: str, user: dict = Depends(require_r
             _predikat(sc),
             ("Lulus" if sc >= kkm else "Belum Lulus") if sc is not None else "Menunggu",
             len(a.get("violations") or []),
-            fmt_dt_id(a.get("submitted_at")),
+            fmt_dt_id(a.get("submitted_at")) + (" (Susulan)" if a.get("is_makeup") else ""),
         ]
         for ci, v in enumerate(vals, start=1):
             c = ws.cell(row=rr, column=ci, value=v)
@@ -2380,23 +2712,40 @@ async def notifications(user: dict = Depends(require_roles("siswa"))):
     my_classes = await db.classes.find({"student_ids": user["id"]}, {"_id": 0, "id": 1}).to_list(1000)
     my_class_ids = {c["id"] for c in my_classes}
     sessions = await db.sessions.find({}, {"_id": 0}).to_list(1000)
+    my_makeups = await db.makeups.find({"student_id": user["id"]}, {"_id": 0}).to_list(500)
+    mmap = {m["session_id"]: m for m in my_makeups}
     now = datetime.now(timezone.utc)
     notes = []
     for s in sessions:
         targets = s.get("class_ids") or []
-        if targets and not (set(targets) & my_class_ids):
+        mk = mmap.get(s["id"])
+        if targets and not (set(targets) & my_class_ids) and not mk:
             continue
         try:
             start = datetime.fromisoformat(s["start_time"])
             end = datetime.fromisoformat(s["end_time"])
         except Exception:
             continue
-        att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]}, {"_id": 0, "status": 1})
+        att = await db.attempts.find_one({"session_id": s["id"], "student_id": user["id"]},
+                                        {"_id": 0, "status": 1, "makeup_id": 1})
         done = att and att["status"] != "berlangsung"
+        if mk and done and att.get("makeup_id") != mk["id"]:
+            done = False  # masih punya hak mengerjakan lewat susulan
         if s.get("announcement"):
             notes.append({"id": f"{s['id']}-ann", "type": "info", "title": s["title"],
                           "message": s["announcement"], "time": s["start_time"]})
         if not done:
+            if mk:
+                mk_status = window_status(mk["start_time"], mk["end_time"], now)
+                alasan = f" Alasan: {mk['reason']}." if mk.get("reason") else ""
+                if mk_status == "akan_datang":
+                    notes.append({"id": f"{mk['id']}-makeup-open", "type": "upcoming", "title": s["title"],
+                                  "message": f"Ujian susulan dijadwalkan untuk Anda.{alasan}",
+                                  "time": mk["start_time"]})
+                elif mk_status == "berlangsung":
+                    notes.append({"id": f"{mk['id']}-makeup-live", "type": "live", "title": s["title"],
+                                  "message": f"Ujian susulan Anda sedang dibuka — segera kerjakan.{alasan}",
+                                  "time": mk["start_time"]})
             if now < start:
                 notes.append({"id": f"{s['id']}-open", "type": "upcoming", "title": s["title"],
                               "message": "Ujian akan segera dibuka.", "time": s["start_time"]})

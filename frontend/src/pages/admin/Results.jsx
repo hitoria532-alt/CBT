@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet, ShieldAlert } from "lucide-react";import api, { apiError } from "../../lib/api";
+import { ClipboardCheck, ChevronRight, ArrowLeft, Download, BarChart3, SlidersHorizontal, FileSpreadsheet, ShieldAlert, CalendarPlus } from "lucide-react";import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL, QTYPE_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
 import { Input } from "../../components/ui/input";
@@ -50,10 +50,10 @@ export default function Results() {
   };
 
   const exportCSV = () => {
-    const rows = [["Nama", "NISN/NIP", "Status", "Nilai", "Waktu Kumpul"]];
+    const rows = [["Nama", "NISN/NIP", "Status", "Nilai", "Jalur", "Waktu Kumpul"]];
     data.attempts.forEach((a) => rows.push([
       a.student_name, a.student_identifier || "-", STATUS_LABEL[a.status] || a.status,
-      a.score ?? "-", fmtDateTime(a.submitted_at),
+      a.score ?? "-", a.is_makeup ? "Susulan" : "Reguler", fmtDateTime(a.submitted_at),
     ]));
     const csv = rows.map((r) => r.map((c) => `"${c}"`).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
@@ -275,7 +275,20 @@ export default function Results() {
             <TableBody>
               {data.attempts.map((a) => (
                 <TableRow key={a.id} data-testid={`result-row-${a.id}`}>
-                  <TableCell className="font-medium">{a.student_name}</TableCell>
+                  <TableCell className="font-medium">
+                    <span className="flex items-center gap-2 flex-wrap">
+                      {a.student_name}
+                      {a.is_makeup && (
+                        <Badge
+                          className="bg-accent/10 text-accent border-0 text-xs"
+                          title="Dikerjakan melalui jadwal ujian susulan"
+                          data-testid={`makeup-tag-${a.id}`}
+                        >
+                          <CalendarPlus className="h-3 w-3 mr-1" />Susulan
+                        </Badge>
+                      )}
+                    </span>
+                  </TableCell>
                   <TableCell className="text-muted-foreground">{a.student_identifier || "-"}</TableCell>
                   <TableCell><Badge variant="outline">{STATUS_LABEL[a.status] || a.status}</Badge></TableCell>
                   <TableCell className="font-semibold">{a.score != null ? a.score : "—"}</TableCell>

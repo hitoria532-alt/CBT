@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { Plus, Pencil, Trash2, CalendarClock } from "lucide-react";
+import { Plus, Pencil, Trash2, CalendarClock, CalendarPlus } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { fmtDateTime, toLocalInput, fromLocalInput, STATUS_LABEL } from "../../lib/utils2";
 import { Button } from "../../components/ui/button";
@@ -9,6 +9,7 @@ import { Textarea } from "../../components/ui/textarea";
 import { Label } from "../../components/ui/label";
 import { Badge } from "../../components/ui/badge";
 import { Checkbox } from "../../components/ui/checkbox";
+import MakeupDialog from "../../components/MakeupDialog";
 import {
   Select, SelectTrigger, SelectValue, SelectContent, SelectItem,
 } from "../../components/ui/select";
@@ -31,6 +32,7 @@ export default function Sessions() {
   const [open, setOpen] = useState(false);
   const [editing, setEditing] = useState(null);
   const [form, setForm] = useState(EMPTY);
+  const [makeupFor, setMakeupFor] = useState(null);
 
   const load = () => api.get("/sessions").then((r) => setItems(r.data));
   useEffect(() => {
@@ -94,6 +96,11 @@ export default function Sessions() {
                 <div className="flex items-center gap-2 mb-2 flex-wrap">
                   <h3 className="font-heading text-lg font-medium">{s.title}</h3>
                   <Badge className={`${statusColor[s.status]} border-0`}>{STATUS_LABEL[s.status]}</Badge>
+                  {s.makeup_count > 0 && (
+                    <Badge className="bg-accent/10 text-accent border-0" data-testid={`makeup-count-${s.id}`}>
+                      <CalendarPlus className="h-3 w-3 mr-1" />{s.makeup_count} susulan
+                    </Badge>
+                  )}
                 </div>
                 <div className="text-sm text-muted-foreground space-y-0.5">
                   <p>Paket: <span className="text-foreground">{s.package_title}</span> · {s.question_count} soal</p>
@@ -102,9 +109,18 @@ export default function Sessions() {
                   <p>Kelas: {s.class_names?.length ? s.class_names.join(", ") : "Semua siswa"}</p>
                 </div>
               </div>
-              <div className="flex gap-1">
-                <button onClick={() => openEdit(s)} className="text-muted-foreground hover:text-primary p-1"><Pencil className="h-4 w-4" /></button>
-                <button onClick={() => remove(s)} className="text-muted-foreground hover:text-destructive p-1"><Trash2 className="h-4 w-4" /></button>
+              <div className="flex items-center gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => setMakeupFor(s)}
+                  className="mr-1"
+                  data-testid={`makeup-btn-${s.id}`}
+                >
+                  <CalendarPlus className="h-4 w-4 mr-2" />Susulan
+                </Button>
+                <button onClick={() => openEdit(s)} className="text-muted-foreground hover:text-primary p-1" data-testid={`edit-session-${s.id}`}><Pencil className="h-4 w-4" /></button>
+                <button onClick={() => remove(s)} className="text-muted-foreground hover:text-destructive p-1" data-testid={`delete-session-${s.id}`}><Trash2 className="h-4 w-4" /></button>
               </div>
             </div>
           ))}
@@ -174,6 +190,13 @@ export default function Sessions() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      <MakeupDialog
+        session={makeupFor}
+        open={!!makeupFor}
+        onOpenChange={(v) => !v && setMakeupFor(null)}
+        onChanged={load}
+      />
     </div>
   );
 }
