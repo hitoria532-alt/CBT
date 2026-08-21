@@ -3,6 +3,7 @@ import { toast } from "sonner";
 import {
   Users, UserPlus, Upload, Download, Search, KeyRound, Pencil, Trash2,
   LogOut, FileSpreadsheet, CheckCircle2, AlertTriangle, Copy, X, Info,
+  IdCard, RefreshCw, Printer,
 } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { Button } from "../../components/ui/button";
@@ -47,6 +48,11 @@ export default function ClassRosterDialog({ cls, open, onOpenChange, onChanged }
   const [created, setCreated] = useState([]); // credentials created in this session
   const [editing, setEditing] = useState(null);
   const [editForm, setEditForm] = useState({ name: "", identifier: "", password: "" });
+  const [resetMode, setResetMode] = useState("random"); // random | same
+  const [resetPwd, setResetPwd] = useState("");
+  const [resetting, setResetting] = useState(false);
+  const [cardSource, setCardSource] = useState("session"); // session | blank | reset
+  const [printing, setPrinting] = useState(false);
   const fileRef = useRef();
 
   const load = async () => {
@@ -66,6 +72,7 @@ export default function ClassRosterDialog({ cls, open, onOpenChange, onChanged }
     if (open && cls) {
       setQ(""); setMode(null); setForm(EMPTY_NEW); setPick([]); setPickQ("");
       setResult(null); setCreated([]); setEditing(null);
+      setResetMode("random"); setResetPwd(""); setCardSource("session");
       load();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -232,6 +239,85 @@ export default function ClassRosterDialog({ cls, open, onOpenChange, onChanged }
     toast.success("Daftar akun baru disalin");
   };
 
+  const resetPasswords = async () => {
+    const count = data.students?.length || 0;
+    if (count === 0) return toast.error("Belum ada siswa di kelas ini");
+    if (resetMode === "same" && (resetPwd || "").length < 5)
+      return toast.error("Password minimal 5 karakter");
+    const label = resetMode === "same"
+      ? `password yang sama untuk ${count} siswa`
+      : `password acak berbeda untuk ${count} siswa`;
+    if (!window.confirm(`Reset ${label} di kelas ${cls.name}? Password lama tidak bisa dipakai lagi.`))
+      return;
+    setResetting(true);
+    try {
+      const { data: r } = await api.post(`/classes/${cls.id}/students/reset-passwords`, {
+        mode: resetMode,
+        password: resetMode === "same" ? resetPwd : null,
+      });
+      setCreated(
+        r.credentials.map((c) => ({ name: c.name, email: c.email, password: c.password }))
+      );
+      setCardSource("session");
+      toast.success(`Password ${r.count} siswa berhasil direset`);
+    } catch (e) {
+      toast.error(apiError(e));
+    } finally {
+      setResetting(false);
+    }
+  };
+
+  const printCards = async (sourceArg) => {
+    const source = sourceArg || cardSource;
+    const count = data.students?.length || 0;
+    if (count === 0) return toast.error("Belum ada siswa di kelas ini");
+    if (source === "session" && created.length === 0)
+      return toast.error("Belum ada password dari sesi ini. Reset password dulu atau pilih kartu kosong.");
+    setPrinting(true);
+    try {
+      let credentials = [];
+      let include = true;
+      if (source === "session") {
+        const byEmail = new Map(created.map((c) => [c.email, c.password]));
+        credentials = (data.students || [])
+          .filter((s) => byEmail.has(s.email))
+          .map((s) => ({
+            name: s.name, email: s.email,
+            identifier: s.identifier || "", password: byEmail.get(s.email),
+          }));
+      } else if (source === "reset") {
+        const { data: r } = await api.post(`/classes/${cls.id}/students/reset-passwords`, {
+          mode: "random",
+        });
+        credentials = r.credentials.map((c) => ({
+          name: c.name, email: c.email, identifier: c.identifier || "", password: c.password,
+        }));
+        setCreated(credentials.map((c) => ({ name: c.name, email: c.email, password: c.password })));
+        toast.success(`Password ${r.count} siswa direset & dicetak di kartu`);
+      } else {
+        include = false;
+        credentials = (data.students || []).map((s) => ({
+          name: s.name, email: s.email, identifier: s.identifier || "", password: "",
+        }));
+      }
+
+      const res = await api.post(
+        `/classes/${cls.id}/students/cards/pdf`,
+        { login_url: window.location.origin, include_password: include, credentials },
+        { responseType: "blob" }
+      );
+      const url = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = url; a.download = `kartu-login-${cls.name}.pdf`; a.click();
+      URL.revokeObjectURL(url);
+      toast.success("Kartu login siap dicetak");
+    } catch (e) {
+      toast.error(apiError(e));
+    } finally {
+      setPrinting(false);
+    }
+  };
+
   if (!cls) return null;
 
   return (
@@ -282,10 +368,140 @@ export default function ClassRosterDialog({ cls, open, onOpenChange, onChanged }
             >
               <Users className="h-4 w-4 mr-1.5" />Tambah dari Akun Ada
             </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setMode(mode === "cards" ? null : "cards")}
+              data-testid="roster-cards-btn"
+            >
+              <IdCard className="h-4 w-4 mr-1.5" />Kartu Login Siswa
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => setMode(mode === "reset" ? null : "reset")}
+              data-testid="roster-reset-btn"
+            >
+              <RefreshCw className="h-4 w-4 mr-1.5" />Reset Password Massal
+            </Button>
             <Button size="sm" variant="outline" onClick={exportRoster} data-testid="roster-export-btn">
               <Download className="h-4 w-4 mr-1.5" />Unduh Daftar Akun
             </Button>
           </div>
+
+          {/* Login cards */}
+          {mode === "cards" && (
+            <div className="rounded-md border border-border p-4 space-y-3 bg-muted/20" data-testid="roster-cards-panel">
+              <p className="text-sm font-medium">Cetak kartu login siswa (PDF)</p>
+              <p className="text-xs text-muted-foreground leading-relaxed">
+                Satu halaman A4 memuat 10 kartu berisi nama, NIS, username, password, dan
+                alamat aplikasi — tinggal dipotong dan dibagikan. Password lama tidak bisa
+                ditampilkan lagi karena disimpan terenkripsi, jadi pilih salah satu cara di bawah.
+              </p>
+              <div className="space-y-2">
+                {[
+                  ["session", `Pakai password dari sesi ini (${created.length} siswa)`,
+                    "Password yang baru Anda buat / reset di jendela ini."],
+                  ["reset", "Reset password acak lalu cetak",
+                    "Setiap siswa dapat password baru yang langsung tercetak di kartunya."],
+                  ["blank", "Kartu tanpa password (kolom kosong)",
+                    "Untuk siswa yang sudah tahu passwordnya, atau diisi tangan."],
+                ].map(([val, title, desc]) => (
+                  <label
+                    key={val}
+                    className={`flex gap-3 rounded-md border p-3 cursor-pointer transition-colors ${
+                      cardSource === val ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/40"
+                    }`}
+                    data-testid={`card-source-${val}`}
+                  >
+                    <input
+                      type="radio"
+                      name="card-source"
+                      className="mt-1 accent-current"
+                      checked={cardSource === val}
+                      onChange={() => setCardSource(val)}
+                    />
+                    <span>
+                      <span className="block text-sm font-medium">{title}</span>
+                      <span className="block text-xs text-muted-foreground">{desc}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+              <Button onClick={printCards} disabled={printing} data-testid="roster-print-cards-btn">
+                <Printer className="h-4 w-4 mr-1.5" />
+                {printing ? "Menyiapkan..." : "Unduh PDF Kartu Login"}
+              </Button>
+            </div>
+          )}
+
+          {/* Bulk password reset */}
+          {mode === "reset" && (
+            <div className="rounded-md border border-border p-4 space-y-3 bg-muted/20" data-testid="roster-reset-panel">
+              <p className="text-sm font-medium">
+                Reset password {data.students?.length || 0} siswa di {cls.name}
+              </p>
+              <div className="space-y-2">
+                <label
+                  className={`flex gap-3 rounded-md border p-3 cursor-pointer transition-colors ${
+                    resetMode === "random" ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/40"
+                  }`}
+                  data-testid="reset-mode-random"
+                >
+                  <input
+                    type="radio"
+                    name="reset-mode"
+                    className="mt-1"
+                    checked={resetMode === "random"}
+                    onChange={() => setResetMode("random")}
+                  />
+                  <span>
+                    <span className="block text-sm font-medium">Password acak per siswa</span>
+                    <span className="block text-xs text-muted-foreground">
+                      Paling aman — setiap siswa dapat password berbeda, langsung tampil untuk disalin/dicetak.
+                    </span>
+                  </span>
+                </label>
+                <label
+                  className={`flex gap-3 rounded-md border p-3 cursor-pointer transition-colors ${
+                    resetMode === "same" ? "border-primary bg-primary/5" : "border-border bg-card hover:border-primary/40"
+                  }`}
+                  data-testid="reset-mode-same"
+                >
+                  <input
+                    type="radio"
+                    name="reset-mode"
+                    className="mt-1"
+                    checked={resetMode === "same"}
+                    onChange={() => setResetMode("same")}
+                  />
+                  <span className="flex-1">
+                    <span className="block text-sm font-medium">Satu password sama untuk semua</span>
+                    <span className="block text-xs text-muted-foreground mb-2">
+                      Praktis untuk ujian serentak. Minimal 5 karakter.
+                    </span>
+                    <Input
+                      value={resetPwd}
+                      onChange={(e) => setResetPwd(e.target.value)}
+                      onClick={(e) => e.stopPropagation()}
+                      placeholder="mis. ujian2026"
+                      className="bg-card max-w-xs"
+                      data-testid="reset-password-input"
+                    />
+                  </span>
+                </label>
+              </div>
+              <div className="flex flex-wrap gap-2 items-center">
+                <Button onClick={resetPasswords} disabled={resetting} data-testid="roster-reset-run-btn">
+                  <KeyRound className="h-4 w-4 mr-1.5" />
+                  {resetting ? "Mereset..." : "Reset Sekarang"}
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  Setelah reset, daftar password baru muncul di bawah dan bisa langsung dicetak sebagai kartu login.
+                </span>
+              </div>
+            </div>
+          )}
 
           {/* Create account */}
           {mode === "new" && (
@@ -474,9 +690,19 @@ export default function ClassRosterDialog({ cls, open, onOpenChange, onChanged }
             <div className="rounded-md border border-primary/25 bg-primary/5 p-4 space-y-2" data-testid="roster-credentials">
               <div className="flex items-center justify-between gap-2">
                 <p className="text-sm font-medium">Akun / password baru (catat sekarang)</p>
-                <Button size="sm" variant="outline" onClick={copyCreds}>
-                  <Copy className="h-3.5 w-3.5 mr-1.5" />Salin
-                </Button>
+                <div className="flex gap-2">
+                  <Button size="sm" variant="outline" onClick={copyCreds}>
+                    <Copy className="h-3.5 w-3.5 mr-1.5" />Salin
+                  </Button>
+                  <Button
+                    size="sm"
+                    onClick={() => { setCardSource("session"); printCards("session"); }}
+                    disabled={printing}
+                    data-testid="roster-print-from-creds-btn"
+                  >
+                    <Printer className="h-3.5 w-3.5 mr-1.5" />Cetak Kartu
+                  </Button>
+                </div>
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-xs">

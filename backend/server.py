@@ -1092,6 +1092,171 @@ async def export_class_roster(cid: str, user: dict = Depends(require_roles("admi
         headers={"Content-Disposition": f'attachment; filename="akun-siswa-{safe}.xlsx"'})
 
 
+# ------------------------------------------------- BULK PASSWORD RESET + LOGIN CARDS
+class ResetPasswordsBody(BaseModel):
+    mode: str = "random"            # "random" (per student) | "same" (one password for all)
+    password: Optional[str] = None  # required when mode == "same"
+    student_ids: List[str] = []     # empty -> every student in the class
+
+
+class CardCredential(BaseModel):
+    name: str = ""
+    email: str = ""
+    identifier: Optional[str] = ""
+    password: Optional[str] = ""
+
+
+class LoginCardsBody(BaseModel):
+    login_url: str = ""
+    include_password: bool = True
+    credentials: List[CardCredential] = []   # empty -> roster with blank password field
+
+
+def _random_password(n: int = 8) -> str:
+    """Readable password: no 0/O/1/l mix-ups, easy to type on a school PC."""
+    alphabet = "abcdefghjkmnpqrstuvwxyz"
+    digits = "23456789"
+    body = "".join(random.choice(alphabet) for _ in range(max(3, n - 3)))
+    return body + "".join(random.choice(digits) for _ in range(3))
+
+
+@api_router.post("/classes/{cid}/students/reset-passwords")
+async def reset_class_passwords(cid: str, body: ResetPasswordsBody,
+                                user: dict = Depends(require_roles("admin"))):
+    """Reset the login password of every (or selected) student of a class in one go."""
+    cls = await _get_class_or_404(cid)
+    roster = await _class_roster(cls)
+    if body.student_ids:
+        wanted = set(body.student_ids)
+        roster = [s for s in roster if s["id"] in wanted]
+    if not roster:
+        raise HTTPException(status_code=400, detail="Tidak ada siswa di kelas ini")
+
+    mode = (body.mode or "random").lower()
+    if mode not in ("random", "same"):
+        raise HTTPException(status_code=400, detail="Mode tidak valid")
+    if mode == "same":
+        if len(body.password or "") < 5:
+            raise HTTPException(status_code=400, detail="Password minimal 5 karakter")
+
+    creds = []
+    for s in roster:
+        pwd = body.password if mode == "same" else _random_password()
+        try:
+            await db.users.update_one({"_id": ObjectId(s["id"]), "role": "siswa"},
+                                      {"$set": {"password_hash": hash_password(pwd)}})
+        except Exception:
+            continue
+        creds.append({"id": s["id"], "name": s["name"], "email": s["email"],
+                      "identifier": s.get("identifier", ""), "password": pwd})
+
+    return {"count": len(creds), "class_name": cls["name"], "credentials": creds}
+
+
+@api_router.post("/classes/{cid}/students/cards/pdf")
+async def class_login_cards(cid: str, body: LoginCardsBody,
+                            user: dict = Depends(require_roles("admin", "guru"))):
+    """Printable login cards (name / username / password) to hand out to students."""
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib import colors
+    from reportlab.pdfgen import canvas as pdfcanvas
+
+    cls = await _get_class_or_404(cid)
+    school = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
+
+    items = [c.model_dump() for c in body.credentials]
+    if not items:
+        items = [{"name": s["name"], "email": s["email"],
+                  "identifier": s.get("identifier", ""), "password": ""}
+                 for s in await _class_roster(cls)]
+    if not items:
+        raise HTTPException(status_code=400, detail="Belum ada siswa di kelas ini")
+
+    buf = io.BytesIO()
+    c = pdfcanvas.Canvas(buf, pagesize=A4)
+    page_w, page_h = A4
+    margin = 12 * mm
+    cols, rows = 2, 5
+    gap = 4 * mm
+    card_w = (page_w - 2 * margin - gap) / cols
+    card_h = (page_h - 2 * margin - (rows - 1) * gap) / rows
+    green = colors.HexColor("#1E3A30")
+    grey = colors.HexColor("#6B7280")
+    line = colors.HexColor("#D9D9CF")
+    login_url = (body.login_url or "").replace("https://", "").replace("http://", "").rstrip("/")
+    school_name = (school.get("name") or "CBT Ujian Online").strip()
+
+    def draw_card(idx, item):
+        pos = idx % (cols * rows)
+        col = pos % cols
+        row = pos // cols
+        x = margin + col * (card_w + gap)
+        y = page_h - margin - (row + 1) * card_h - row * gap
+
+        c.setStrokeColor(line)
+        c.setLineWidth(0.8)
+        c.roundRect(x, y, card_w, card_h, 3 * mm, stroke=1, fill=0)
+
+        # header band
+        c.setFillColor(green)
+        c.roundRect(x, y + card_h - 9 * mm, card_w, 9 * mm, 3 * mm, stroke=0, fill=1)
+        c.setFillColor(colors.white)
+        c.setFont("Helvetica-Bold", 8.5)
+        c.drawString(x + 5 * mm, y + card_h - 6 * mm, school_name.upper()[:38])
+        c.setFont("Helvetica", 7.5)
+        c.drawRightString(x + card_w - 5 * mm, y + card_h - 6 * mm, cls["name"][:22])
+
+        ty = y + card_h - 15 * mm
+        c.setFillColor(grey)
+        c.setFont("Helvetica", 6.5)
+        c.drawString(x + 5 * mm, ty, "KARTU LOGIN SISWA")
+        ty -= 6 * mm
+        c.setFillColor(colors.black)
+        c.setFont("Helvetica-Bold", 11)
+        c.drawString(x + 5 * mm, ty, (item.get("name") or "-")[:34])
+        if item.get("identifier"):
+            ty -= 4.5 * mm
+            c.setFillColor(grey)
+            c.setFont("Helvetica", 7.5)
+            c.drawString(x + 5 * mm, ty, f"NIS/NISN: {item['identifier']}")
+
+        ty -= 7 * mm
+        for label, value in (("Username", item.get("email") or "-"),
+                             ("Password", (item.get("password") or "") if body.include_password else "")):
+            c.setFillColor(grey)
+            c.setFont("Helvetica", 7)
+            c.drawString(x + 5 * mm, ty, label.upper())
+            c.setFillColor(colors.black)
+            c.setFont("Courier-Bold", 9.5)
+            shown = value if value else "________________"
+            c.drawString(x + 22 * mm, ty - 0.3 * mm, shown[:26])
+            c.setStrokeColor(line)
+            c.setLineWidth(0.4)
+            c.line(x + 5 * mm, ty - 2.2 * mm, x + card_w - 5 * mm, ty - 2.2 * mm)
+            ty -= 7 * mm
+
+        c.setFillColor(grey)
+        c.setFont("Helvetica", 6.5)
+        if login_url:
+            c.drawString(x + 5 * mm, y + 7.5 * mm, f"Buka: {login_url}"[:52])
+            c.drawString(x + 5 * mm, y + 4 * mm, "Masuk dengan username & password di atas.")
+        else:
+            c.drawString(x + 5 * mm, y + 4 * mm, "Masuk ke aplikasi CBT dengan username & password di atas.")
+
+    for i, item in enumerate(items):
+        if i > 0 and i % (cols * rows) == 0:
+            c.showPage()
+        draw_card(i, item)
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", cls["name"]).strip("-") or "kelas"
+    return StreamingResponse(
+        buf, media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="kartu-login-{safe}.pdf"'})
+
+
 # ------------------------------------------------------------------ STUDENT IMPORT (Excel)
 STUDENT_COLS = ["nama", "kelas", "nis", "username", "password"]
 STUDENT_COL_HELP = {
