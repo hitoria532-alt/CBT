@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   Plus, Pencil, Trash2, Users, Search, Download, FileText, Upload,
-  FileSpreadsheet, CheckCircle2, AlertTriangle,
+  FileSpreadsheet, CheckCircle2, AlertTriangle, KeyRound, IdCard, RefreshCw,
+  ChevronDown,
 } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { useAuth } from "../../context/AuthContext";
@@ -15,6 +16,10 @@ import { Checkbox } from "../../components/ui/checkbox";
 import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter,
 } from "../../components/ui/dialog";
+import {
+  DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem,
+  DropdownMenuLabel, DropdownMenuSeparator,
+} from "../../components/ui/dropdown-menu";
 
 const EMPTY = { name: "", description: "", student_ids: [] };
 
@@ -28,6 +33,7 @@ export default function Classes() {
   const [importOpen, setImportOpen] = useState(false);
   const [importing, setImporting] = useState(false);
   const [result, setResult] = useState(null);
+  const [accountBusy, setAccountBusy] = useState(false);
   const fileRef = useRef();
   const { user } = useAuth();
   const isAdmin = user?.role === "admin";
@@ -115,6 +121,95 @@ export default function Classes() {
 
   const openImport = () => { setResult(null); setImportOpen(true); };
 
+  // ---------------------------------------------------------------- ekspor akun login
+  const RESET_WARNING =
+    "Password lama semua siswa di daftar ini akan DIGANTI dan tidak berlaku lagi.\n\n" +
+    "Lanjutkan membuat password baru lalu mengunduh berkasnya?";
+
+  const downloadFile = async (url, filename, okMsg) => {
+    setAccountBusy(true);
+    try {
+      const res = await api.get(url, { responseType: "blob" });
+      const objUrl = URL.createObjectURL(res.data);
+      const a = document.createElement("a");
+      a.href = objUrl; a.download = filename; a.click();
+      URL.revokeObjectURL(objUrl);
+      toast.success(okMsg);
+    } catch (e) {
+      toast.error(apiError(e));
+    } finally {
+      setAccountBusy(false);
+    }
+  };
+
+  const exportAccounts = (c, { pdf = false, reset = false } = {}) => {
+    if (reset && !window.confirm(RESET_WARNING)) return;
+    const q = reset ? "?reset=true" : "";
+    const base = c
+      ? `/export/class/${c.id}/accounts/${pdf ? "pdf" : "xlsx"}${q}`
+      : `/export/accounts/${pdf ? "pdf" : "xlsx"}${q}`;
+    const scope = c ? c.name : "semua-kelas";
+    const name = pdf
+      ? `kartu-login-${scope}.pdf`
+      : `akun-siswa-${scope}.xlsx`;
+    downloadFile(
+      base,
+      name.replace(/\s+/g, "_"),
+      reset ? "Password baru dibuat & berkas diunduh" : "Berkas akun diunduh",
+    );
+  };
+
+  const AccountMenu = ({ cls, size = "sm", label = "Akun" }) => (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button
+          size={size}
+          variant="outline"
+          disabled={accountBusy}
+          data-testid={cls ? `accounts-menu-${cls.id}` : "accounts-menu-all"}
+        >
+          <KeyRound className="h-4 w-4 mr-1.5" />{label}
+          <ChevronDown className="h-3.5 w-3.5 ml-1 opacity-60" />
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-72 bg-card">
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          {cls ? cls.name : "Semua kelas"} — akun siap login
+        </DropdownMenuLabel>
+        <DropdownMenuItem
+          onClick={() => exportAccounts(cls)}
+          data-testid={cls ? `export-accounts-xlsx-${cls.id}` : "export-accounts-xlsx-all"}
+        >
+          <FileSpreadsheet className="h-4 w-4 mr-2" />Ekspor Akun (Excel)
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => exportAccounts(cls, { pdf: true })}
+          data-testid={cls ? `export-accounts-pdf-${cls.id}` : "export-accounts-pdf-all"}
+        >
+          <IdCard className="h-4 w-4 mr-2" />Kartu Login Siap Potong (PDF)
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="text-xs font-normal text-muted-foreground">
+          Paksa password baru
+        </DropdownMenuLabel>
+        <DropdownMenuItem
+          onClick={() => exportAccounts(cls, { reset: true })}
+          className="text-accent focus:text-accent"
+          data-testid={cls ? `reset-accounts-xlsx-${cls.id}` : "reset-accounts-xlsx-all"}
+        >
+          <RefreshCw className="h-4 w-4 mr-2" />Reset &amp; Ekspor (Excel)
+        </DropdownMenuItem>
+        <DropdownMenuItem
+          onClick={() => exportAccounts(cls, { pdf: true, reset: true })}
+          className="text-accent focus:text-accent"
+          data-testid={cls ? `reset-accounts-pdf-${cls.id}` : "reset-accounts-pdf-all"}
+        >
+          <RefreshCw className="h-4 w-4 mr-2" />Reset &amp; Ekspor Kartu (PDF)
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+
   const filtered = students.filter((s) =>
     s.name.toLowerCase().includes(q.toLowerCase()) || (s.identifier || "").includes(q));
 
@@ -125,7 +220,8 @@ export default function Classes() {
           <p className="text-xs font-bold uppercase tracking-[0.2em] text-muted-foreground">Rombongan Belajar</p>
           <h1 className="font-heading text-3xl sm:text-4xl font-semibold tracking-tight mt-1">Manajemen Kelas</h1>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-3 flex-wrap">
+          {isAdmin && <AccountMenu cls={null} size="default" label="Akun Semua Kelas" />}
           {isAdmin && (
             <Button variant="outline" onClick={openImport} data-testid="import-students-btn">
               <Upload className="h-4 w-4 mr-2" />Impor Siswa
@@ -153,13 +249,14 @@ export default function Classes() {
               <p className="text-sm text-muted-foreground mt-1 mb-4">{c.description || "Tanpa deskripsi"}</p>
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <Badge className="bg-primary/10 text-primary border-0">{c.student_count} siswa</Badge>
-                <div className="flex gap-2">
+                <div className="flex gap-2 flex-wrap">
                   <Button size="sm" variant="outline" onClick={() => exportGrades(c)} data-testid={`export-grades-${c.id}`}>
                     <Download className="h-4 w-4 mr-1.5" />Rekap
                   </Button>
                   <Button size="sm" variant="outline" onClick={() => downloadClassReport(c)} data-testid={`class-report-${c.id}`}>
                     <FileText className="h-4 w-4 mr-1.5" />Rapor
                   </Button>
+                  {isAdmin && <AccountMenu cls={c} />}
                 </div>
               </div>
             </div>

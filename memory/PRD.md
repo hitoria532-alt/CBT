@@ -297,3 +297,55 @@ dan siswa lain di kelas yang sama tetap terblokir.
 
 > Catatan menjalankan pytest: WAJIB `REACT_APP_BACKEND_URL=http://localhost:8001` karena
 > default di test lama menunjuk URL preview lama yang sudah mati.
+
+## Implemented (2026-08-20) — Iteration 17: Ekspor Akun Login Siswa
+Permintaan user: akun siswa yang dibuat di Manajemen Kelas ikut ke ekspor Excel, dan
+akun pada berkas ekspor sudah aktif serta bisa langsung dipakai login. Plus kartu login
+PDF dengan logo sekolah di atasnya.
+
+**Masalah**: password disimpan ter-hash bcrypt, tidak bisa dibaca balik untuk ditulis ke
+Excel. **Solusi yang dipilih user (gabungan)**:
+- Field baru `initial_password` disimpan saat akun siswa dibuat/diubah — lewat
+  `POST /api/users`, `PUT /api/users/{id}`, dan impor siswa Excel. Dipakai HANYA untuk
+  ekspor kartu login; **di-strip di `clean_user()`** sehingga tidak pernah bocor lewat
+  `GET /api/users` atau `/api/auth/me`.
+- Saat ekspor, siswa yang belum punya `initial_password` (akun lama) otomatis dibuatkan
+  password baru + akunnya benar-benar di-reset, sehingga **setiap baris pada berkas dijamin
+  bisa login**. Kolom Status Akun membedakan `Aktif · Password Tersimpan` vs
+  `Aktif · Password Baru`.
+- Parameter `?reset=true` (tombol **Reset & Ekspor**) memaksa password baru untuk seluruh
+  siswa di daftar.
+- Password dibuat dari alfabet tanpa karakter ambigu (`0/O`, `1/l/I`), 8 karakter.
+
+**Endpoint baru (khusus admin — guru & siswa 403)**
+- `GET /api/export/class/{class_id}/accounts/xlsx?reset=` — 1 sheet, kop sekolah, kolom
+  `No, Nama, NIS, Kelas, Username (Email), Password, Status Akun`
+- `GET /api/export/accounts/xlsx?reset=` — semua kelas, 1 sheet per kelas
+- `GET /api/export/class/{class_id}/accounts/pdf?reset=` — kartu login siap potong
+- `GET /api/export/accounts/pdf?reset=` — kartu login semua kelas
+- Helper: `generate_student_password()`, `collect_class_accounts()`, `_accounts_sheet()`,
+  `_safe_sheet_title()`, `_build_login_cards_pdf()`
+
+**Kartu login PDF**: 2 kolom x A4, tiap kartu memuat logo + nama sekolah di atas, kicker
+"KARTU LOGIN UJIAN ONLINE (CBT)", lalu Nama / Kelas · NIS / Username / Password
+(font monospace agar tidak salah baca), dengan garis putus-putus sebagai panduan potong.
+Logo diperkecil sekali ke 180px sebelum disematkan — PDF turun dari 784 KB → 65 KB.
+Tinggi kartu 37 mm agar baris Password tidak tertimpa garis potong.
+
+**Frontend** (`pages/admin/Classes.jsx`): komponen `AccountMenu` (shadcn DropdownMenu) —
+tombol **Akun** di setiap kartu kelas dan **Akun Semua Kelas** di header (keduanya
+admin-only), masing-masing berisi 4 aksi: Ekspor Akun (Excel), Kartu Login Siap Potong
+(PDF), Reset & Ekspor (Excel), Reset & Ekspor Kartu (PDF). Aksi reset dikonfirmasi lebih
+dulu dengan peringatan bahwa password lama tidak berlaku lagi.
+
+**Verified**: 11 test baru (`tests/test_iteration17.py`) — termasuk uji bahwa setiap
+kredensial di berkas ekspor benar-benar bisa login, password stabil pada ekspor kedua,
+reset mengganti password & membatalkan yang lama, `initial_password` tidak bocor di
+`/api/users`, dan otorisasi guru/siswa 403. Suite penuh **188 passed / 2 skipped**
+(dijalankan 2x). Unduhan diverifikasi nyata dari browser (xlsx per kelas, pdf kartu,
+xlsx semua kelas) dan tampilan PDF diperiksa visual.
+
+> Catatan isolasi test: `test_iteration17.py` membuat kelas & siswa sendiri
+> (`[PYTEST] Kelas Akun <worker_id>`, disuffix karena pytest-xdist menjalankan fixture
+> module-scope sekali per worker) karena ekspor dapat me-reset password — jangan pernah menguji
+> reset pada akun demo yang dipakai suite lain.
