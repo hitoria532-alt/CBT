@@ -32,3 +32,10 @@ export const STATUS_LABEL = {
 
 export const ROLE_LABEL = { admin: "Admin", guru: "Guru", siswa: "Siswa" };
 export const QTYPE_LABEL = { pg: "Pilihan Ganda", truefalse: "Benar / Salah", essay: "Esai" };
+
+export const MAKEUP_STATUS_LABEL = {
+  akan_datang: "Belum Dibuka",
+  berlangsung: "Sedang Dibuka",
+  selesai: "Kedaluwarsa",
+  sudah_dikerjakan: "Sudah Dikerjakan",
+};

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
-import { ClipboardList, ChevronRight, FileDown } from "lucide-react";
+import { ClipboardList, ChevronRight, FileDown, CalendarPlus } from "lucide-react";
 import api, { apiError } from "../../lib/api";
 import { fmtDateTime, STATUS_LABEL } from "../../lib/utils2";
 import { Badge } from "../../components/ui/badge";
@@ -45,7 +45,14 @@ export default function StudentResults() {
               <button key={a.id} onClick={() => nav(`/hasil/${a.id}`)} data-testid={`result-${a.id}`}
                 className="w-full text-left bg-card border border-border rounded-md p-6 flex items-center justify-between gap-4 hover:border-primary/40 hover:bg-primary/5 transition-colors">
                 <div>
-                  <h3 className="font-heading text-lg font-medium">{a.session_title}</h3>
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="font-heading text-lg font-medium">{a.session_title}</h3>
+                    {a.is_makeup && (
+                      <Badge className="bg-accent/10 text-accent border-0 text-xs" data-testid={`result-makeup-${a.id}`}>
+                        <CalendarPlus className="h-3 w-3 mr-1" />Susulan
+                      </Badge>
+                    )}
+                  </div>
                   <p className="text-sm text-muted-foreground">Dikumpulkan {fmtDateTime(a.submitted_at)}</p>
                   {a.status === "menunggu_koreksi" && <Badge variant="outline" className="mt-2">{STATUS_LABEL.menunggu_koreksi}</Badge>}
                 </div>
