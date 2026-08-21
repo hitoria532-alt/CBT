@@ -573,8 +573,8 @@ class CBTAPITester:
         return success
 
     def test_school_settings(self):
-        """Test school settings"""
-        # Get settings (should be public)
+        """Test school settings with theme color sanitization"""
+        # Get settings (should be public and return valid HSL triplet)
         success, settings = self.run_test(
             "Get School Settings (Public)",
             "GET",
@@ -584,20 +584,122 @@ class CBTAPITester:
         if not success:
             return False
         
-        # Update settings (admin only)
-        success, _ = self.run_test(
-            "Update School Settings",
+        # Verify theme_color is a valid HSL triplet or None
+        theme = settings.get("theme_color")
+        if theme:
+            import re
+            hsl_pattern = r"^-?\d+(\.\d+)?\s+\d+(\.\d+)?%\s+\d+(\.\d+)?%$"
+            if not re.match(hsl_pattern, theme):
+                print(f"❌ CRITICAL: GET /settings/school returned invalid theme_color: '{theme}' (not a valid HSL triplet)")
+                self.tests_failed += 1
+                self.failed_tests.append(f"School Settings GET - Invalid theme_color format: {theme}")
+                return False
+            print(f"   ✓ theme_color is valid HSL triplet: '{theme}'")
+        
+        # Test 1: Update with legacy color name 'green' - should be sanitized to HSL
+        success, response = self.run_test(
+            "Update School Settings (legacy 'green')",
             "PUT",
             "settings/school",
             200,
             data={
-                "name": "Test School",
-                "address": "Test Address",
+                "name": "",
+                "address": "",
                 "logo_path": None,
                 "theme_color": "green"
             },
             token=self.admin_token
         )
+        if success:
+            # Verify it was sanitized
+            if response.get("theme_color") == "green":
+                print(f"❌ CRITICAL: Backend did not sanitize 'green' to HSL triplet")
+                self.tests_failed += 1
+                self.failed_tests.append("School Settings PUT - 'green' not sanitized")
+                return False
+            print(f"   ✓ 'green' sanitized to: '{response.get('theme_color')}'")
+        
+        # Test 2: Update with hex color - should be sanitized
+        success, response = self.run_test(
+            "Update School Settings (hex '#1e3a30')",
+            "PUT",
+            "settings/school",
+            200,
+            data={
+                "name": "",
+                "address": "",
+                "logo_path": None,
+                "theme_color": "#1e3a30"
+            },
+            token=self.admin_token
+        )
+        if success:
+            if response.get("theme_color") == "#1e3a30":
+                print(f"❌ CRITICAL: Backend did not sanitize hex '#1e3a30' to HSL triplet")
+                self.tests_failed += 1
+                self.failed_tests.append("School Settings PUT - hex not sanitized")
+                return False
+            print(f"   ✓ '#1e3a30' sanitized to: '{response.get('theme_color')}'")
+        
+        # Test 3: Update with invalid value - should be sanitized to None or default
+        success, response = self.run_test(
+            "Update School Settings (invalid 'not-a-color')",
+            "PUT",
+            "settings/school",
+            200,
+            data={
+                "name": "",
+                "address": "",
+                "logo_path": None,
+                "theme_color": "not-a-color"
+            },
+            token=self.admin_token
+        )
+        if success:
+            if response.get("theme_color") == "not-a-color":
+                print(f"❌ CRITICAL: Backend did not sanitize invalid value 'not-a-color'")
+                self.tests_failed += 1
+                self.failed_tests.append("School Settings PUT - invalid value not sanitized")
+                return False
+            print(f"   ✓ 'not-a-color' sanitized to: '{response.get('theme_color')}'")
+        
+        # Test 4: Update with valid HSL triplet - should be preserved
+        success, response = self.run_test(
+            "Update School Settings (valid HSL '215 60% 30%')",
+            "PUT",
+            "settings/school",
+            200,
+            data={
+                "name": "",
+                "address": "",
+                "logo_path": None,
+                "theme_color": "215 60% 30%"
+            },
+            token=self.admin_token
+        )
+        if success:
+            if response.get("theme_color") != "215 60% 30%":
+                print(f"❌ Valid HSL triplet was not preserved: got '{response.get('theme_color')}'")
+                self.tests_failed += 1
+                self.failed_tests.append("School Settings PUT - valid HSL not preserved")
+                return False
+            print(f"   ✓ Valid HSL '215 60% 30%' preserved correctly")
+        
+        # Test 5: Restore to default theme
+        success, response = self.run_test(
+            "Restore School Settings to default",
+            "PUT",
+            "settings/school",
+            200,
+            data={
+                "name": "",
+                "address": "",
+                "logo_path": None,
+                "theme_color": "157 35% 18%"
+            },
+            token=self.admin_token
+        )
+        
         return success
 
     def test_difficulty_settings(self):

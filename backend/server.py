@@ -278,6 +278,34 @@ class DifficultyBody(BaseModel):
     medium_min: float = 40.0
 
 
+DEFAULT_THEME_COLOR = "157 35% 18%"
+THEME_HSL_RE = re.compile(r"^-?\d+(\.\d+)?\s+\d+(\.\d+)?%\s+\d+(\.\d+)?%$")
+LEGACY_THEME_MAP = {
+    "green": "157 35% 18%", "#1e3a30": "157 35% 18%",
+    "blue": "215 60% 30%", "#1f4e8c": "215 60% 30%",
+    "purple": "265 45% 40%", "#5b3a94": "265 45% 40%",
+    "red": "0 60% 40%", "#a32626": "0 60% 40%",
+    "teal": "200 70% 30%", "#106688": "200 70% 30%",
+    "brown": "25 60% 35%", "#8a4b1e": "25 60% 35%",
+}
+
+
+def sanitize_theme_color(value: Optional[str]) -> Optional[str]:
+    """Only allow a Tailwind HSL triplet ('157 35% 18%'); map known legacy names.
+
+    An invalid value (e.g. 'green') would produce `hsl(green)` in the browser and
+    make every element that uses --primary render as blank/white text.
+    """
+    if not isinstance(value, str):
+        return None
+    v = value.strip()
+    if not v:
+        return None
+    if THEME_HSL_RE.match(v):
+        return v
+    return LEGACY_THEME_MAP.get(v.lower())
+
+
 class SchoolBody(BaseModel):
     name: str = ""
     address: str = ""
@@ -2413,13 +2441,16 @@ async def get_school():
     """Public: school identity/theme is needed to brand the login screen."""
     doc = await db.settings.find_one({"key": "school"}, {"_id": 0}) or {}
     return {"name": doc.get("name", ""), "address": doc.get("address", ""),
-            "logo_path": doc.get("logo_path"), "theme_color": doc.get("theme_color")}
+            "logo_path": doc.get("logo_path"),
+            "theme_color": sanitize_theme_color(doc.get("theme_color")) or DEFAULT_THEME_COLOR}
 
 
 @api_router.put("/settings/school")
 async def set_school(body: SchoolBody, user: dict = Depends(require_roles("admin"))):
-    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **body.model_dump()}}, upsert=True)
-    return body.model_dump()
+    payload = body.model_dump()
+    payload["theme_color"] = sanitize_theme_color(payload.get("theme_color")) or DEFAULT_THEME_COLOR
+    await db.settings.update_one({"key": "school"}, {"$set": {"key": "school", **payload}}, upsert=True)
+    return payload
 
 
 def _logo_flowable(logo_path):
